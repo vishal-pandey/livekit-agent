@@ -1,0 +1,82 @@
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Environment files (these should be injected at runtime)
+.env
+.env.local
+.env.production
+.env.staging
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+tmp/
+temp/
+
+# Documentation
+README.md
+*.md
+
+# Docker files (not needed inside container)
+Dockerfile*
+docker-compose*.yml
+
+# Node modules (if any)
+node_modules/
+
+# Recordings (these are generated at runtime)
+recordings/*.wav
+recordings/*.mp3
+recordings/*.ogg
+recordings/*.json
+recordings/*.txt
+
+# Keep the recordings directory structure but ignore content
+!recordings/.gitkeep
