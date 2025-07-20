@@ -1,0 +1,66 @@
+name: Build and Publish LiveKit Agent
+
+on:
+  push:
+    branches: [ master ]
+    tags: [ 'v*.*.*' ]
+  workflow_dispatch:  # Allow manual triggering
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: livekit-voice-agent
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version
+        id: version
+        run: |
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION=${{ github.sha }}
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.title=LiveKit Voice Agent
+            org.opencontainers.image.description=Hindi telemedical examination voice agent built with LiveKit
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.created=${{ github.event.repository.updated_at }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image digest
+        run: echo "Image published at ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}"

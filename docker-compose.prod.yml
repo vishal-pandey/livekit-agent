@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  livekit-voice-agent:
+    image: ghcr.io/vishal-pandey/livekit-voice-agent:latest
+    container_name: lumiq-voice-agent-prod
+    restart: unless-stopped
+    
+    # Environment variables (override these with your actual values)
+    environment:
+      # Optional API Keys (if needed)
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      - CARTESIA_API_KEY=${CARTESIA_API_KEY}
+      
+      # OpenAI Configuration
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      
+      # LiveKit Configuration
+      - LIVEKIT_URL=${LIVEKIT_URL}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+      
+      # Sarvam AI Configuration (for Hindi STT/TTS)
+      - SARVAM_API_KEY=${SARVAM_API_KEY}
+      
+      # Google AI Configuration (for medical report generation)
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      
+      # AWS S3 Configuration (for Egress Recording)
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION:-ap-south-1}
+      - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+      
+      # MongoDB Configuration
+      - MONGO_DB_PASSWORD=${MONGO_DB_PASSWORD}
+      
+      # Python configuration
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    
+    # Volumes for persistent data
+    volumes:
+      - ./recordings:/app/recordings
+      - ./logs:/app/logs
+      - huggingface-cache:/home/app/.cache/huggingface  # Cache for AI models
+      - ./tmp:/tmp  # Additional temp space
+    
+    # Network configuration
+    networks:
+      - livekit-network
+    
+    # Resource limits (increased for AI model downloads)
+    deploy:
+      resources:
+        limits:
+          memory: 4G  # Increased for model loading
+          cpus: '2.0'  # Increased for better performance
+        reservations:
+          memory: 2G  # Increased minimum memory
+          cpus: '1.0'
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+networks:
+  livekit-network:
+    driver: bridge
+
+volumes:
+  recordings-data:
+  logs-data:
+  huggingface-cache:  # Volume for Hugging Face model cache

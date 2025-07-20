@@ -1,0 +1,38 @@
+name: Deploy LiveKit Agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - production
+        - staging
+      image_tag:
+        description: 'Docker image tag to deploy'
+        required: true
+        default: 'latest'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Deploy notification
+        run: |
+          echo "Deploying LiveKit Agent"
+          echo "Environment: ${{ github.event.inputs.environment }}"
+          echo "Image: ghcr.io/${{ github.repository_owner }}/livekit-voice-agent:${{ github.event.inputs.image_tag }}"
+      
+      # Add your deployment steps here, for example:
+      # - SSH to server
+      # - Pull the new image
+      # - Update docker-compose
+      # - Restart services
