@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   livekit-voice-agent:
-    build: .
+    image: ghcr.io/vishal-pandey/livekit-voice-agent:latest
     container_name: lumiq-voice-agent
     restart: unless-stopped
     

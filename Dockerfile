@@ -45,7 +45,7 @@ RUN mkdir -p recordings && \
 # RUN python3 -c "import requests; print('Network test:', requests.get('https://httpbin.org/ip', timeout=30).status_code)"
 
 # Pre-download models (only if network is available during build)
-# RUN python3 agent.py download-files
+RUN python3 agent.py download-files
 
 # Health check to ensure the container is running properly
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
