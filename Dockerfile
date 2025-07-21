@@ -1,5 +1,5 @@
 # Fixed Dockerfile with proper SSL and networking setup
-FROM python:3.12-slim
+FROM python:3.12
 
 # Set working directory
 WORKDIR /app
@@ -14,9 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && update-ca-certificates
 
 # Create a non-root user for security
-RUN useradd --create-home --shell /bin/bash app && \
-    chown -R app:app /app
-USER app
+# RUN useradd --create-home --shell /bin/bash app && \
+#     chown -R app:app /app
+# USER app
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
