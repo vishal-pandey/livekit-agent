@@ -365,11 +365,11 @@ class VolumeFilteredAssistant(Agent):
   "questions": [
     {{
       "Question Description": "Has any member ever applied for a policy with Care Heath Insurance in the past?",
-      "Input Type": "Yes/No Checkbox"
+      "Input Type": "Yes or No"
     }},
     {{
       "Question Description": "Has any of the person(s) to be insured ever filed a claim with their current / previous or any other insurer?",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "Please Provide Detail",
@@ -379,7 +379,7 @@ class VolumeFilteredAssistant(Agent):
     }},
     {{
       "Question Description": "Is any member suffering from Diabetes/Sugar problem or has been tested to have high blood sugar?",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "When was any member first detected with Diabetes/Sugar?",
@@ -387,21 +387,21 @@ class VolumeFilteredAssistant(Agent):
         }},
         {{
           "Question Description": "Has any member ever been prescribed or taken Insulin?",
-          "Input Type": "Yes/No Checkbox"
+          "Input Type": "Yes or No"
         }},
         {{
           "Question Description": "Has any member suffered from any complications of Diabetes like reduced vision, kidney complications, non healing ulcer?",
-          "Input Type": "Yes/No Checkbox"
+          "Input Type": "Yes or No"
         }}
       ]
     }},
     {{
       "Question Description": "Has any member been diagnosed with high cholesterol or Lipid disorder?",
-      "Input Type": "Yes/No Checkbox"
+      "Input Type": "Yes or No"
     }},
     {{
       "Question Description": "Has any member been detected to have high BP or blood pressure or Hypertension?",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "When was any member first detected for having high BP/Blood Pressure/ Hypertension?",
@@ -411,7 +411,7 @@ class VolumeFilteredAssistant(Agent):
     }},
     {{
       "Question Description": "Does any member have a Cardiac or Heart problem or experienced chest pain in the past?",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "Please choose the problem.",
@@ -429,7 +429,7 @@ class VolumeFilteredAssistant(Agent):
     }},
     {{
       "Question Description": "Has any member experienced any symptoms of joint pain in Knee, Shoulder, Hip etc.?",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "Please provide detail along with medication prescribed/ taken, if any.",
@@ -439,7 +439,7 @@ class VolumeFilteredAssistant(Agent):
     }},
     {{
       "Question Description": "Has any member suffered any vision related problem like blurry or hazy vision.",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "Please choose the Problem.",
@@ -455,7 +455,7 @@ class VolumeFilteredAssistant(Agent):
     }},
     {{
       "Question Description": "Has any member been diagnosed for gall bladder, kidney or urinary stones?",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "Please choose the problem.",
@@ -469,7 +469,7 @@ class VolumeFilteredAssistant(Agent):
     }},
     {{
       "Question Description": "Has any member been diagnosed for prostrate related problem, any complaints of increased urinary frequency, urgency or retention?",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "When was member first Diagnosed with Prostate or urinary disorder ?",
@@ -483,7 +483,7 @@ class VolumeFilteredAssistant(Agent):
     }},
     {{
       "Question Description": "Has any member ever been diagnosed with any gynaecological problems like abnormal bleeding, cyst or fibroid in ovaries etc.?",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "When was member first Diagnosed with gynaecological problems ?",
@@ -497,7 +497,7 @@ class VolumeFilteredAssistant(Agent):
     }},
     {{
       "Question Description": "Has any member ever been diagnosed with any form of Thyroid disorder",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "Please confirm type of Thyroid Disorder and/or name of medicine prescribed?",
@@ -511,7 +511,7 @@ class VolumeFilteredAssistant(Agent):
     }},
     {{
       "Question Description": "Has any member ever been admitted to a hospital or undergone or advised for a surgery",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "Please specify the reason for hospitalization or surgery.",
@@ -521,7 +521,7 @@ class VolumeFilteredAssistant(Agent):
     }},
     {{
       "Question Description": "Has any member ever done medical test like Ultrasound/ CT scan/ MRI, 2D echo or any major investigation with positive finding? Please share report",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "Please specify",
@@ -531,7 +531,7 @@ class VolumeFilteredAssistant(Agent):
     }},
     {{
       "Question Description": "Has any member ever experienced symptoms such as pain in abdomen or any other part of body, breathlessness?",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "Please specify.",
@@ -541,7 +541,7 @@ class VolumeFilteredAssistant(Agent):
     }},
     {{
       "Question Description": "Do you want to disclose any other condition/illness/procedure for any member, other than the ones already answered above?",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "Please specify.",
@@ -551,7 +551,7 @@ class VolumeFilteredAssistant(Agent):
     }},
     {{
       "Question Description": "Does any member smoke?",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "How many cigarettes/ bidi does MemberName smoke?",
@@ -565,7 +565,7 @@ class VolumeFilteredAssistant(Agent):
     }},
     {{
       "Question Description": "Does any member consume alcohol?",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "How often does any member drink?",
@@ -579,7 +579,7 @@ class VolumeFilteredAssistant(Agent):
     }},
     {{
       "Question Description": "Does any member have a habit of chewing tobacco/pan masala/gutka?",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "How often does any member consume chewing tobacco/pan masala/gutka?",
@@ -593,7 +593,7 @@ class VolumeFilteredAssistant(Agent):
     }},
     {{
       "Question Description": "Does any member have any other prohibitive habits?",
-      "Input Type": "Yes/No Checkbox",
+      "Input Type": "Yes or No",
       "sub_options": [
         {{
           "Question Description": "Please Specify.",
@@ -823,71 +823,71 @@ async def generate_structured_report(transcript_data, family_details: str = ""):
         "<Family Member 1 Name>":
         {{
             "Previous Insurance Claims": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Extracted Details or Inferred Details"
             }},
             "Diabetes/Sugar Problem": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including detection date, insulin usage, complications"
             }},
             "High Cholesterol/Lipid Disorder": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details"
             }},
             "Hypertension/High Blood Pressure": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including detection date"
             }},
             "Cardiac/Heart Problems": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including type of problem, procedures, timeline"
             }},
             "Joint Pain": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including location, medications"
             }},
             "Vision Problems": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including type, operated/unoperated"
             }},
             "Gall Bladder/Kidney/Urinary Stones": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including type, treatment status"
             }},
             "Prostate Problems": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including diagnosis date, symptoms"
             }},
             "Gynaecological Problems": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including diagnosis date, type"
             }},
             "Thyroid Disorder": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including type, medication, duration"
             }},
             "Hospitalization/Surgery": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including reason, date, location"
             }},
             "Medical Tests": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including type of test, findings"
             }},
             "Other Symptoms": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including pain location, breathlessness"
             }},
             "Smoking Habits": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including quantity, duration"
             }},
             "Alcohol Consumption": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including frequency, quantity"
             }},
             "Tobacco/Pan Masala Habits": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including frequency, quantity"
             }},
             "Height and Weight": {{
@@ -898,71 +898,71 @@ async def generate_structured_report(transcript_data, family_details: str = ""):
 
         "<Family Member 2 Name>": {{
             "Previous Insurance Claims": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Extracted Details or Inferred Details"
             }},
             "Diabetes/Sugar Problem": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including detection date, insulin usage, complications"
             }},
             "High Cholesterol/Lipid Disorder": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details"
             }},
             "Hypertension/High Blood Pressure": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including detection date"
             }},
             "Cardiac/Heart Problems": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including type of problem, procedures, timeline"
             }},
             "Joint Pain": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including location, medications"
             }},
             "Vision Problems": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including type, operated/unoperated"
             }},
             "Gall Bladder/Kidney/Urinary Stones": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including type, treatment status"
             }},
             "Prostate Problems": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including diagnosis date, symptoms"
             }},
             "Gynaecological Problems": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including diagnosis date, type"
             }},
             "Thyroid Disorder": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including type, medication, duration"
             }},
             "Hospitalization/Surgery": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including reason, date, location"
             }},
             "Medical Tests": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including type of test, findings"
             }},
             "Other Symptoms": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including pain location, breathlessness"
             }},
             "Smoking Habits": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including quantity, duration"
             }},
             "Alcohol Consumption": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including frequency, quantity"
             }},
             "Tobacco/Pan Masala Habits": {{
-                "answered_yes_no": "Yes/No",
+                "answered_yes_no": "Yes or No",
                 "details": "Details including frequency, quantity"
             }},
             "Height and Weight": {{
