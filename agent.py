@@ -3,6 +3,7 @@ from typing import Optional
 import numpy as np
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -33,10 +34,14 @@ load_dotenv()
 # MongoDB Configuration
 MONGO_CONNECTION_STRING = "mongodb+srv://lumiq:{db_password}@cluster0.x40mx40.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 DATABASE_NAME = "telemer"
+POLICY_DATABASE_NAME = "policy_db"
 COLLECTIONS = {
     "call_sessions": "call_sessions",
     "medical_summaries": "medical_summaries", 
     "transcripts": "transcripts"
+}
+POLICY_COLLECTIONS = {
+    "proposals": "proposals"
 }
 
 
@@ -46,6 +51,7 @@ class MongoDBManager:
     def __init__(self):
         self.client = None
         self.database = None
+        self.policy_database = None
         
     async def connect(self):
         """Connect to MongoDB"""
@@ -59,6 +65,7 @@ class MongoDBManager:
             connection_string = MONGO_CONNECTION_STRING.replace("{db_password}", mongo_password)
             self.client = AsyncIOMotorClient(connection_string)
             self.database = self.client[DATABASE_NAME]
+            self.policy_database = self.client[POLICY_DATABASE_NAME]
             
             # Test connection
             await self.client.admin.command('ping')
@@ -205,6 +212,69 @@ class MongoDBManager:
             logger.error(f"Failed to store medical summary: {e}")
             return False
 
+    async def get_family_details(self, room_name: str) -> Optional[dict]:
+        """Get family details from the policy database for a given room name"""
+        try:
+            if self.policy_database is None:
+                logger.error("Policy database not connected")
+                return None
+                
+            logger.info(f"Fetching family details for room: {room_name}")
+            
+            collection = self.policy_database[POLICY_COLLECTIONS["proposals"]]
+            proposal = await collection.find_one({"proposalNo": room_name})
+            
+            if proposal:
+                logger.info(f"Found family details for room: {room_name}")
+                return proposal
+            else:
+                logger.warning(f"No proposal found for room: {room_name}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Failed to get family details: {e}")
+            return None
+
+    def format_family_details_for_prompt(self, member_details: list) -> str:
+        """Format family details into a readable format for the AI prompt"""
+        if not member_details:
+            return "No family details available."
+        
+        formatted_text = "Family Members for Telemedical Examination:\n\n"
+        
+        for i, member in enumerate(member_details, 1):
+            basic_info = member.get("basicInfo", {})
+            medical_questions = member.get("medicalQuestions", [])
+            eligible = member.get("eligibleForTelemedical", False)
+            reason = member.get("telemedicalReason", "")
+            
+            formatted_text += f"Member {i}:\n"
+            formatted_text += f"- Name: {basic_info.get('name', 'N/A')}\n"
+            formatted_text += f"- Age: {basic_info.get('age', 'N/A')}\n"
+            formatted_text += f"- Gender: {basic_info.get('gender', 'N/A')}\n"
+            formatted_text += f"- Relationship: {basic_info.get('relationship', 'N/A')}\n"
+            formatted_text += f"- Occupation: {basic_info.get('occupation', 'N/A')}\n"
+            formatted_text += f"- Sum Insured: ₹{basic_info.get('sumInsured', 'N/A')}\n"
+            formatted_text += f"- Eligible for Telemedical: {'Yes' if eligible else 'No'}\n"
+            
+            if reason:
+                formatted_text += f"- Telemedical Reason: {reason}\n"
+            
+            if medical_questions:
+                formatted_text += f"- Pre-filled Medical Information:\n"
+                for question in medical_questions:
+                    if question.get("requiresTelemedical", False):
+                        formatted_text += f"  * {question.get('question', 'N/A')}: {question.get('answer', 'N/A')}"
+                        if question.get('details'):
+                            formatted_text += f" - {question.get('details')}"
+                        formatted_text += "\n"
+            
+            formatted_text += "\n"
+        
+        formatted_text += "Focus the telemedical examination on members who are 'Eligible for Telemedical' and pay special attention to their pre-filled medical information.\n"
+        
+        return formatted_text
+
 
 # Global MongoDB manager instance
 mongo_manager = MongoDBManager()
@@ -253,90 +323,97 @@ class VolumeBasedVAD:
 
 # Custom Agent with volume-based filtering using LiveKit's built-in session history
 class VolumeFilteredAssistant(Agent):
-    def __init__(self, room_name: str = "unknown") -> None:
-        super().__init__(instructions="""
-        You are a tele medical examination assistant that responds only to the primary speaker.
+    def __init__(self, room_name: str = "unknown", family_details: str = "") -> None:
+        
+        # Family details section
+        family_section = family_details or "No family details available."
+
+        logger.info("VISHAL_PANDEY")
+        logger.info(family_section)
+        
+        # Base instructions with the JSON questions (no placeholders needed in JSON)
+        final_instructions = f"""
+        You are a tele medical examination assistant.
         your role is to conduct the telemedical examination by asking questions and ask the reflexive questions based on the user's responses.
         
-        You need to be smart to get all the answers correctly and efficiently from the user.
+        You need to be smart to get all the answers correctly and efficiently from the user about each member of the family for whom eligibleForTelemedical is required 
         You are a female voice assistant with a friendly and professional tone.
         
         You speak in hindi but you also do understand english.
         You generally speak in hinglish and use daily use words and phrases in english only, also whenever you need to talk about the medical terms you need to pronounce the meidical terms and medecine names in english only.
-                         
+
         Below I am providing you the questions that you need to ask the user in order to conduct the telemedical examination.
         The questions are in json format and it is a reflexive questionnaire, which means you need to ask the questions based on the user's responses.
                          
+        This tele medical examination is being conducted collect the medical history of multiple people in a family. The questions below are provided to be answered for each perspon in the family for which we need to conduct the tele medical examination.
+        Below is the details of the people in the family for which we need to conduct the tele medical examination.
+        It also has some preliminary information about the people in the family.
+        Please make sure all the relevent answer for the questions listed below are collected for all the users who are relevant for telemer.
+
+        {family_section}
+                         
+
+        ** Make sure when you conduct the medical examination you ask questions refering to specific persons for whon telemedical examination need to be conducted, do not talk in generic terms like any of the member or something, we have Names of all the persons for whom we need to conduct the tele medical examination in the family **
+        
+        ** While Asking questions make sure you address the name of the person for whom the question is related to, you need to make sure you collect answer of all the questions for all the members in the family for which eligibleForTelemedical is required**
 
         There might be multiple person in the room while this call is being conducted, so you need to ingore the content which are not relevant to the primary speaker.
         And anytime if you have some confustion around what user has said, you can ask the user to answer the question again or provide more details.
                          
 
-        {
+        {{
   "questions": [
-    {
-      "Q.No.": "Q1",
+    {{
       "Question Description": "Has any member ever applied for a policy with Care Heath Insurance in the past?",
       "Input Type": "Yes/No Checkbox"
-    },
-    {
-      "Q.No.": "Q2",
+    }},
+    {{
       "Question Description": "Has any of the person(s) to be insured ever filed a claim with their current / previous or any other insurer?",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q2a",
+        {{
           "Question Description": "Please Provide Detail",
           "Input Type": "Free Text"
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q 3",
+    }},
+    {{
       "Question Description": "Is any member suffering from Diabetes/Sugar problem or has been tested to have high blood sugar?",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q3a",
+        {{
           "Question Description": "When was any member first detected with Diabetes/Sugar?",
           "Input Type": "Year/Month, No. of Years/Months"
-        },
-        {
-          "Q.No.": "Q3b",
+        }},
+        {{
           "Question Description": "Has any member ever been prescribed or taken Insulin?",
           "Input Type": "Yes/No Checkbox"
-        },
-        {
-          "Q.No.": "Q3c",
+        }},
+        {{
           "Question Description": "Has any member suffered from any complications of Diabetes like reduced vision, kidney complications, non healing ulcer?",
           "Input Type": "Yes/No Checkbox"
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q4",
+    }},
+    {{
       "Question Description": "Has any member been diagnosed with high cholesterol or Lipid disorder?",
       "Input Type": "Yes/No Checkbox"
-    },
-    {
-      "Q.No.": "Q5",
+    }},
+    {{
       "Question Description": "Has any member been detected to have high BP or blood pressure or Hypertension?",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q5a",
+        {{
           "Question Description": "When was any member first detected for having high BP/Blood Pressure/ Hypertension?",
           "Input Type": "Year/Month, No. of Years/Months"
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q6",
+    }},
+    {{
       "Question Description": "Does any member have a Cardiac or Heart problem or experienced chest pain in the past?",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q6a",
+        {{
           "Question Description": "Please choose the problem.",
           "Input Type": "Dropdown + Free Text (For 'Any Other..)",
           "Dropdown List": [
@@ -347,28 +424,24 @@ class VolumeFilteredAssistant(Agent):
             "Increased or slow heart rate For e.g Palpitations, Tachycardia or Bradycardia (No. of Year / Months )",
             "Any other type of disorder"
           ]
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q7",
+    }},
+    {{
       "Question Description": "Has any member experienced any symptoms of joint pain in Knee, Shoulder, Hip etc.?",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q7a",
+        {{
           "Question Description": "Please provide detail along with medication prescribed/ taken, if any.",
           "Input Type": "Free Text"
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q8",
+    }},
+    {{
       "Question Description": "Has any member suffered any vision related problem like blurry or hazy vision.",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q8a",
+        {{
           "Question Description": "Please choose the Problem.",
           "Input Type": "Dropdown + Free Text (Fot 'Any Other..')",
           "Dropdown List": [
@@ -377,200 +450,170 @@ class VolumeFilteredAssistant(Agent):
             "Glaucoma (No. of Year / Months) - ( Operated / Unoperated )",
             "Any other type of disorder"
           ]
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q9",
+    }},
+    {{
       "Question Description": "Has any member been diagnosed for gall bladder, kidney or urinary stones?",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q9a",
+        {{
           "Question Description": "Please choose the problem.",
           "Input Type": "Dropdown",
           "Dropdown List": [
             "Gall Bladder Stone (No. of Year / Months) - ( Operated / Unoperated )",
             "Kidney or Urinary Stone (No. of Year / Months) - ( Operated / Conservatively resolved / Unoperated )"
           ]
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q10",
+    }},
+    {{
       "Question Description": "Has any member been diagnosed for prostrate related problem, any complaints of increased urinary frequency, urgency or retention?",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q10 a",
+        {{
           "Question Description": "When was member first Diagnosed with Prostate or urinary disorder ?",
           "Input Type": "Year/Month, No. of Years/Months"
-        },
-        {
-          "Q.No.": "Q10 b",
+        }},
+        {{
           "Question Description": "Please specify",
           "Input Type": "Free Text"
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q11",
+    }},
+    {{
       "Question Description": "Has any member ever been diagnosed with any gynaecological problems like abnormal bleeding, cyst or fibroid in ovaries etc.?",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q 11 a",
+        {{
           "Question Description": "When was member first Diagnosed with gynaecological problems ?",
           "Input Type": "Year/Month, No. of Years/Months"
-        },
-        {
-          "Q.No.": "Q 11 b",
+        }},
+        {{
           "Question Description": "Please specify",
           "Input Type": "Free Text"
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q12",
+    }},
+    {{
       "Question Description": "Has any member ever been diagnosed with any form of Thyroid disorder",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q12a",
+        {{
           "Question Description": "Please confirm type of Thyroid Disorder and/or name of medicine prescribed?",
           "Input Type": "Free Text"
-        },
-        {
-          "Q.No.": "Q12b",
+        }},
+        {{
           "Question Description": "How long has any member of the policy been suffering from thyroid disorder?",
           "Input Type": "Year/Month, No. of ears/Months"
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q13",
+    }},
+    {{
       "Question Description": "Has any member ever been admitted to a hospital or undergone or advised for a surgery",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q13a",
+        {{
           "Question Description": "Please specify the reason for hospitalization or surgery.",
           "Input Type": "Free Text with Limit up to 400 Words"
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q14",
+    }},
+    {{
       "Question Description": "Has any member ever done medical test like Ultrasound/ CT scan/ MRI, 2D echo or any major investigation with positive finding? Please share report",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q14 a",
+        {{
           "Question Description": "Please specify",
           "Input Type": "Free Text"
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q15",
+    }},
+    {{
       "Question Description": "Has any member ever experienced symptoms such as pain in abdomen or any other part of body, breathlessness?",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q15a",
+        {{
           "Question Description": "Please specify.",
           "Input Type": "Free Text"
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q16",
+    }},
+    {{
       "Question Description": "Do you want to disclose any other condition/illness/procedure for any member, other than the ones already answered above?",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q16a",
+        {{
           "Question Description": "Please specify.",
           "Input Type": "Free Text with Limit up to 400 Words"
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q17",
+    }},
+    {{
       "Question Description": "Does any member smoke?",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q17a",
+        {{
           "Question Description": "How many cigarettes/ bidi does MemberName smoke?",
           "Input Type": "Number Dropdown"
-        },
-        {
-          "Q.No.": "Q17b",
+        }},
+        {{
           "Question Description": "Since when has any member been smoking?",
           "Input Type": "Year/Month, No. of Years/Months"
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q18",
+    }},
+    {{
       "Question Description": "Does any member consume alcohol?",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q18a",
+        {{
           "Question Description": "How often does any member drink?",
           "Input Type": "Dropdown: Occasionally, Daily, Weekly"
-        },
-        {
-          "Q.No.": "Q18b",
+        }},
+        {{
           "Question Description": "Please specify quantity? (Ex. Unit would be 30 ml of liquor per day/week) (Alcohol consumption (e.g., 100 ml) throws an error due to the digit limit.)",
           "Input Type": "Number Dropdown"
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q19",
+    }},
+    {{
       "Question Description": "Does any member have a habit of chewing tobacco/pan masala/gutka?",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q19a",
+        {{
           "Question Description": "How often does any member consume chewing tobacco/pan masala/gutka?",
           "Input Type": "Dropdown: Occasionally, Daily, Weekly"
-        },
-        {
-          "Q.No.": "Q19b",
+        }},
+        {{
           "Question Description": "How much does any member consume? Enter number (Ex. Sachets/grams per day (The current input limit of 2 digits is inadequate.),",
           "Input Type": "Number Dropdown"
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q20",
+    }},
+    {{
       "Question Description": "Does any member have any other prohibitive habits?",
       "Input Type": "Yes/No Checkbox",
       "sub_options": [
-        {
-          "Q.No.": "Q20a",
+        {{
           "Question Description": "Please Specify.",
           "Input Type": "Free Text"
-        }
+        }}
       ]
-    },
-    {
-      "Q.No.": "Q21",
+    }},
+    {{
       "Question Description": "What is the height of member/s in feet and inches? (Ex: 5,3 for 5 feet and 3 inches)",
       "Input Type": "Number Dropdown: Feet and Inches"
-    },
-    {
-      "Q.No.": "Q22",
+    }},
+    {{
       "Question Description": "What is the weight of member/s in Kgs? (Ex: 82 for 82 KGs)",
       "Input Type": "Number Dropdown: Kgs"
-    }
+    }}
   ]
-}
-""")
+}}
+"""
+        
+        super().__init__(instructions=final_instructions)
         self.volume_filter = VolumeBasedVAD(volume_threshold=0.025, energy_threshold=0.08)
         self.ignored_frames = 0
         self.processed_frames = 0
@@ -717,7 +760,7 @@ def calculate_transcript_confidence(transcript_data: dict) -> int:
         return 85
 
 
-async def generate_structured_report(transcript_data):
+async def generate_structured_report(transcript_data, family_details: str = ""):
     """
     Generates a structured medical report from the conversation transcript using a direct Gemini API call.
     This function is adapted from old_agent.py to work with LiveKit session history.
@@ -747,6 +790,12 @@ async def generate_structured_report(transcript_data):
     If the condition was mentioned or inferred, even if not explicitly stated as 'Yes', mark it as 'Yes' and provide the details.
     If details are inferred, clearly mark them as "Inferred Details".
 
+    This summary we need to gemerate for each member in the family, the final report should have the json for each member in the family for which we need to conduct the tele medical examination.
+
+    Below are the basic details about the family members:
+
+    {family_details}
+
     Medical Conditions to Extract (Based on Insurance Questionnaire):
     1. Previous Insurance Claims
     2. Diabetes/Sugar Problem
@@ -769,78 +818,157 @@ async def generate_structured_report(transcript_data):
 
     Output Format (JSON):
     ```json
+
     {{
-        "Previous Insurance Claims": {{
-            "answered_yes_no": "Yes/No",
-            "details": "Extracted Details or Inferred Details"
+        "<Family Member 1 Name>":
+        {{
+            "Previous Insurance Claims": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Extracted Details or Inferred Details"
+            }},
+            "Diabetes/Sugar Problem": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including detection date, insulin usage, complications"
+            }},
+            "High Cholesterol/Lipid Disorder": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details"
+            }},
+            "Hypertension/High Blood Pressure": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including detection date"
+            }},
+            "Cardiac/Heart Problems": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including type of problem, procedures, timeline"
+            }},
+            "Joint Pain": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including location, medications"
+            }},
+            "Vision Problems": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including type, operated/unoperated"
+            }},
+            "Gall Bladder/Kidney/Urinary Stones": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including type, treatment status"
+            }},
+            "Prostate Problems": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including diagnosis date, symptoms"
+            }},
+            "Gynaecological Problems": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including diagnosis date, type"
+            }},
+            "Thyroid Disorder": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including type, medication, duration"
+            }},
+            "Hospitalization/Surgery": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including reason, date, location"
+            }},
+            "Medical Tests": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including type of test, findings"
+            }},
+            "Other Symptoms": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including pain location, breathlessness"
+            }},
+            "Smoking Habits": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including quantity, duration"
+            }},
+            "Alcohol Consumption": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including frequency, quantity"
+            }},
+            "Tobacco/Pan Masala Habits": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including frequency, quantity"
+            }},
+            "Height and Weight": {{
+                "height": "Height in feet and inches",
+                "weight": "Weight in KGs"
+            }}
         }},
-        "Diabetes/Sugar Problem": {{
-            "answered_yes_no": "Yes/No",
-            "details": "Details including detection date, insulin usage, complications"
-        }},
-        "High Cholesterol/Lipid Disorder": {{
-            "answered_yes_no": "Yes/No",
-            "details": "Details"
-        }},
-        "Hypertension/High Blood Pressure": {{
-            "answered_yes_no": "Yes/No",
-            "details": "Details including detection date"
-        }},
-        "Cardiac/Heart Problems": {{
-            "answered_yes_no": "Yes/No",
-            "details": "Details including type of problem, procedures, timeline"
-        }},
-        "Joint Pain": {{
-            "answered_yes_no": "Yes/No",
-            "details": "Details including location, medications"
-        }},
-        "Vision Problems": {{
-            "answered_yes_no": "Yes/No",
-            "details": "Details including type, operated/unoperated"
-        }},
-        "Gall Bladder/Kidney/Urinary Stones": {{
-            "answered_yes_no": "Yes/No",
-            "details": "Details including type, treatment status"
-        }},
-        "Prostate Problems": {{
-            "answered_yes_no": "Yes/No",
-            "details": "Details including diagnosis date, symptoms"
-        }},
-        "Gynaecological Problems": {{
-            "answered_yes_no": "Yes/No",
-            "details": "Details including diagnosis date, type"
-        }},
-        "Thyroid Disorder": {{
-            "answered_yes_no": "Yes/No",
-            "details": "Details including type, medication, duration"
-        }},
-        "Hospitalization/Surgery": {{
-            "answered_yes_no": "Yes/No",
-            "details": "Details including reason, date, location"
-        }},
-        "Medical Tests": {{
-            "answered_yes_no": "Yes/No",
-            "details": "Details including type of test, findings"
-        }},
-        "Other Symptoms": {{
-            "answered_yes_no": "Yes/No",
-            "details": "Details including pain location, breathlessness"
-        }},
-        "Smoking Habits": {{
-            "answered_yes_no": "Yes/No",
-            "details": "Details including quantity, duration"
-        }},
-        "Alcohol Consumption": {{
-            "answered_yes_no": "Yes/No",
-            "details": "Details including frequency, quantity"
-        }},
-        "Tobacco/Pan Masala Habits": {{
-            "answered_yes_no": "Yes/No",
-            "details": "Details including frequency, quantity"
-        }},
-        "Height and Weight": {{
-            "height": "Height in feet and inches",
-            "weight": "Weight in KGs"
+
+        "<Family Member 2 Name>": {{
+            "Previous Insurance Claims": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Extracted Details or Inferred Details"
+            }},
+            "Diabetes/Sugar Problem": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including detection date, insulin usage, complications"
+            }},
+            "High Cholesterol/Lipid Disorder": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details"
+            }},
+            "Hypertension/High Blood Pressure": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including detection date"
+            }},
+            "Cardiac/Heart Problems": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including type of problem, procedures, timeline"
+            }},
+            "Joint Pain": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including location, medications"
+            }},
+            "Vision Problems": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including type, operated/unoperated"
+            }},
+            "Gall Bladder/Kidney/Urinary Stones": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including type, treatment status"
+            }},
+            "Prostate Problems": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including diagnosis date, symptoms"
+            }},
+            "Gynaecological Problems": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including diagnosis date, type"
+            }},
+            "Thyroid Disorder": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including type, medication, duration"
+            }},
+            "Hospitalization/Surgery": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including reason, date, location"
+            }},
+            "Medical Tests": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including type of test, findings"
+            }},
+            "Other Symptoms": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including pain location, breathlessness"
+            }},
+            "Smoking Habits": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including quantity, duration"
+            }},
+            "Alcohol Consumption": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including frequency, quantity"
+            }},
+            "Tobacco/Pan Masala Habits": {{
+                "answered_yes_no": "Yes/No",
+                "details": "Details including frequency, quantity"
+            }},
+            "Height and Weight": {{
+                "height": "Height in feet and inches",
+                "weight": "Weight in KGs"
+            }}
         }}
     }}
     ```
@@ -1086,7 +1214,11 @@ async def write_transcript_and_generate_summary(session: AgentSession, room_name
     
     # Generate structured medical report using Gemini API (from old_agent.py)
     logger.info("Generating structured medical report with Gemini API...")
-    structured_report = await generate_structured_report(transcript_data)
+    # Fetch family details for the report prompt
+    family_data = await mongo_manager.get_family_details(room_name)
+    member_details = family_data.get('memberDetails', []) if family_data else []
+    family_details_str = mongo_manager.format_family_details_for_prompt(member_details)
+    structured_report = await generate_structured_report(transcript_data, family_details=family_details_str)
     
     # Save the structured medical report (without timestamp)
     report_filename = output_dir / f"medical_report_{room_name}.json"
@@ -1240,9 +1372,40 @@ async def entrypoint(ctx: agents.JobContext):
     """Main entrypoint for the agent."""
     http_session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False))
 
+    # Store the room name
+    room_name = ctx.room.name
+    logger.info(f"Starting agent for room: {room_name}")
+
+    # Initialize MongoDB connection and fetch family details
+    mongo_manager = MongoDBManager()
+    await mongo_manager.connect()
+    
+    family_details = ""
+    
+    try:
+        # Use room name directly to fetch family details (same as used for storing medical reports)
+        logger.info(f"Fetching family details for room: {room_name}")
+        
+        # Fetch family details using room name directly
+        family_data = await mongo_manager.get_family_details(room_name)
+        if family_data:
+            # Extract member details from the proposal data
+            member_details = family_data.get('memberDetails', [])
+            family_details = mongo_manager.format_family_details_for_prompt(member_details)
+            logger.info("Successfully fetched and formatted family details")
+        else:
+            logger.warning(f"No family details found for room: {room_name}")
+            
+    except Exception as e:
+        logger.error(f"Error fetching family details: {e}")
+        # Continue with empty family details rather than failing
+    
+    # Close MongoDB connection
+    await mongo_manager.close()
+
     session = AgentSession(
         stt=sarvam.STT(language="hi-IN", model="saarika:v2.5"),
-        llm=openai.LLM(model="gpt-4o-mini"),
+        llm=openai.LLM(model="gpt-4o"),
         tts=sarvam.TTS(target_language_code="hi-IN", speaker="anushka", http_session=http_session),
         vad=ctx.proc.userdata.get("vad") or silero.VAD.load(activation_threshold=0.85, min_silence_duration=0.8),
         turn_detection=MultilingualModel(),
@@ -1250,7 +1413,7 @@ async def entrypoint(ctx: agents.JobContext):
 
     recording_egress_id: Optional[str] = None
     recording_s3_url: Optional[str] = None
-    agent = VolumeFilteredAssistant(ctx.room.name)
+    agent = VolumeFilteredAssistant(room_name=room_name, family_details=family_details)
     recording_started = False
 
     async def cleanup_and_record():
