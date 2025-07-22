@@ -350,49 +350,335 @@ class SilenceDetector:
             return "अगर आप वहाँ नहीं हैं तो मैं यह सेशन समाप्त कर दूंगी। कृपया जवाब दें।"
 
 
-class VolumeBasedVAD:
-    """Custom VAD that filters based on volume/energy to focus on primary speaker"""
+class EnhancedNoiseFilter:
+    """
+    Enhanced noise filtering system for telemedical examinations in noisy environments.
+    Uses multiple techniques to identify and focus on the primary speaker while 
+    filtering out background conversations and noise.
+    """
     
-    def __init__(self, volume_threshold: float = 0.02, energy_threshold: float = 0.05):
+    def __init__(self, 
+                 volume_threshold: float = 0.015,  # Lower threshold for better sensitivity
+                 energy_threshold: float = 0.05,   # Lower energy threshold
+                 consistency_threshold: int = 2,   # Reduced consistency requirement
+                 speaker_change_sensitivity: float = 0.3):
+        # Basic thresholds - made more sensitive for better user voice pickup
         self.volume_threshold = volume_threshold
         self.energy_threshold = energy_threshold
+        
+        # Advanced filtering parameters - reduced for better responsiveness
+        self.consistency_threshold = consistency_threshold  # Frames needed to confirm speaker change
+        self.speaker_change_sensitivity = speaker_change_sensitivity
+        
+        # Audio analysis history
         self.recent_volumes = []
-        self.max_history = 50  # Keep last 50 frames for baseline
+        self.recent_energies = []
+        self.recent_frequencies = []
+        self.max_history = 100  # Increased for better baseline
+        
+        # Primary speaker characteristics
+        self.primary_speaker_volume_range = None
+        self.primary_speaker_energy_range = None
+        self.primary_speaker_established = False
+        self.frames_since_primary_established = 0
+        
+        # Background noise estimation
+        self.background_noise_level = 0.01
+        self.noise_samples = []
+        self.max_noise_samples = 30
+        
+        # Speaker consistency tracking
+        self.consistent_speaker_frames = 0
+        self.speaker_change_candidates = 0
+        
+        # Statistics
+        self.total_frames = 0
+        self.primary_speaker_frames = 0
+        self.background_noise_frames = 0
+        self.rejected_frames = 0
+        
+        # Emergency fallback mode
+        self.use_basic_filtering = False  # Can be enabled if enhanced filtering is too strict
+        
+        logger.info("Enhanced noise filter initialized for telemedical examination")
+    
+    def _calculate_spectral_features(self, audio_data: np.ndarray) -> dict:
+        """Calculate spectral features to help distinguish speakers"""
+        try:
+            # Calculate FFT for frequency analysis
+            fft = np.fft.rfft(audio_data)
+            magnitude = np.abs(fft)
+            
+            # Find dominant frequency
+            dominant_freq_idx = np.argmax(magnitude)
+            
+            # Calculate spectral centroid (brightness measure)
+            freqs = np.fft.rfftfreq(len(audio_data), 1/16000)  # Assuming 16kHz sample rate
+            spectral_centroid = np.sum(freqs * magnitude) / np.sum(magnitude) if np.sum(magnitude) > 0 else 0
+            
+            # Calculate spectral rolloff (90% of energy)
+            cumsum = np.cumsum(magnitude)
+            rolloff_idx = np.where(cumsum >= 0.9 * cumsum[-1])[0]
+            spectral_rolloff = freqs[rolloff_idx[0]] if len(rolloff_idx) > 0 else 0
+            
+            return {
+                'dominant_frequency': freqs[dominant_freq_idx] if dominant_freq_idx < len(freqs) else 0,
+                'spectral_centroid': spectral_centroid,
+                'spectral_rolloff': spectral_rolloff,
+                'high_frequency_energy': np.sum(magnitude[len(magnitude)//2:]) / np.sum(magnitude) if np.sum(magnitude) > 0 else 0
+            }
+        except Exception as e:
+            logger.debug(f"Error calculating spectral features: {e}")
+            return {'dominant_frequency': 0, 'spectral_centroid': 0, 'spectral_rolloff': 0, 'high_frequency_energy': 0}
+    
+    def _update_background_noise_estimation(self, rms: float, energy: float):
+        """Update background noise level estimation"""
+        # If this appears to be background noise (low energy, consistent level)
+        if rms < self.volume_threshold * 1.5 and energy < self.energy_threshold * 1.5:
+            self.noise_samples.append(rms)
+            if len(self.noise_samples) > self.max_noise_samples:
+                self.noise_samples.pop(0)
+            
+            if len(self.noise_samples) >= 10:
+                self.background_noise_level = np.mean(self.noise_samples)
+    
+    def _establish_primary_speaker_profile(self, rms: float, energy: float, spectral_features: dict):
+        """Establish or update the primary speaker's audio profile"""
+        if not self.primary_speaker_established:
+            # More lenient requirements to establish primary speaker
+            if (rms > self.volume_threshold * 1.5 and  # Reduced from 2x to 1.5x
+                energy > self.energy_threshold * 1.5 and  # Reduced from 2x to 1.5x
+                rms > self.background_noise_level * 2):   # Reduced from 3x to 2x
+                
+                self.consistent_speaker_frames += 1
+                
+                if self.consistent_speaker_frames >= self.consistency_threshold:
+                    # Establish primary speaker profile with wider tolerance ranges
+                    recent_rms = self.recent_volumes[-self.consistency_threshold:]
+                    recent_energy = self.recent_energies[-self.consistency_threshold:]
+                    
+                    self.primary_speaker_volume_range = (
+                        np.mean(recent_rms) * 0.3,  # Lower bound - more inclusive
+                        np.mean(recent_rms) * 4.0   # Upper bound - more inclusive
+                    )
+                    
+                    self.primary_speaker_energy_range = (
+                        np.mean(recent_energy) * 0.3,  # Lower bound - more inclusive
+                        np.mean(recent_energy) * 4.0   # Upper bound - more inclusive
+                    )
+                    
+                    self.primary_speaker_established = True
+                    self.frames_since_primary_established = 0
+                    
+                    logger.info(f"🎯 Primary speaker established for telemedical examination!")
+                    logger.info(f"   📊 Volume range: {self.primary_speaker_volume_range[0]:.4f} - {self.primary_speaker_volume_range[1]:.4f}")
+                    logger.info(f"   ⚡ Energy range: {self.primary_speaker_energy_range[0]:.4f} - {self.primary_speaker_energy_range[1]:.4f}")
+                    logger.info(f"   🔇 Background noise level: {self.background_noise_level:.4f}")
+                    logger.info(f"   🎙️ Enhanced noise filtering now active - focusing on primary speaker only")
+            else:
+                self.consistent_speaker_frames = 0
+    
+    def _is_primary_speaker(self, rms: float, energy: float, spectral_features: dict) -> bool:
+        """Determine if the current audio frame is from the primary speaker"""
+        if not self.primary_speaker_established or self.primary_speaker_volume_range is None or self.primary_speaker_energy_range is None:
+            return False
+        
+        # Check if audio characteristics match primary speaker profile
+        volume_match = (self.primary_speaker_volume_range[0] <= rms <= self.primary_speaker_volume_range[1])
+        energy_match = (self.primary_speaker_energy_range[0] <= energy <= self.primary_speaker_energy_range[1])
+        
+        # Additional checks for background noise rejection - made more lenient
+        above_noise_floor = rms > self.background_noise_level * 1.8  # Reduced from 2.5x to 1.8x
+        sufficient_energy = energy > self.energy_threshold * 0.8     # Reduced threshold
+        
+        # Spectral consistency check - made more forgiving
+        reasonable_frequency = 30 <= spectral_features.get('dominant_frequency', 0) <= 8000  # Wider frequency range
+        
+        # More lenient decision - allow if most criteria are met
+        criteria_met = sum([volume_match, energy_match, above_noise_floor, sufficient_energy, reasonable_frequency])
+        is_primary = bool(criteria_met >= 3)  # Need at least 3 out of 5 criteria
+        
+        if is_primary:
+            self.frames_since_primary_established += 1
+            # Gradually adapt the profile to account for natural variation
+            if self.frames_since_primary_established % 30 == 0:  # More frequent adaptation
+                self._adapt_speaker_profile(rms, energy)
+        
+        return is_primary
+    
+    def _adapt_speaker_profile(self, rms: float, energy: float):
+        """Gradually adapt the primary speaker profile to account for natural variation"""
+        if (self.primary_speaker_established and 
+            self.primary_speaker_volume_range is not None and 
+            self.primary_speaker_energy_range is not None):
+            
+            # Slight adjustment toward current values (10% adaptation rate)
+            current_vol_center = (self.primary_speaker_volume_range[0] + self.primary_speaker_volume_range[1]) / 2
+            current_energy_center = (self.primary_speaker_energy_range[0] + self.primary_speaker_energy_range[1]) / 2
+            
+            new_vol_center = current_vol_center * 0.9 + rms * 0.1
+            new_energy_center = current_energy_center * 0.9 + energy * 0.1
+            
+            vol_range_width = self.primary_speaker_volume_range[1] - self.primary_speaker_volume_range[0]
+            energy_range_width = self.primary_speaker_energy_range[1] - self.primary_speaker_energy_range[0]
+            
+            self.primary_speaker_volume_range = (
+                new_vol_center - vol_range_width/2,
+                new_vol_center + vol_range_width/2
+            )
+            
+            self.primary_speaker_energy_range = (
+                new_energy_center - energy_range_width/2,
+                new_energy_center + energy_range_width/2
+            )
     
     def should_process_audio(self, audio_frame: rtc.AudioFrame) -> bool:
-        """Determine if audio frame has sufficient volume/energy to be from primary speaker"""
-        # Convert audio data to numpy array
-        audio_data = np.frombuffer(audio_frame.data, dtype=np.int16).astype(np.float32) / 32768.0
+        """
+        Determine if audio frame should be processed for STT based on enhanced noise filtering.
+        Returns True if the frame is likely from the primary speaker.
+        """
+        self.total_frames += 1
         
-        # Calculate RMS (Root Mean Square) for volume
-        rms = np.sqrt(np.mean(audio_data**2))
+        # Emergency fallback to basic filtering if enabled
+        if self.use_basic_filtering:
+            try:
+                audio_data = np.frombuffer(audio_frame.data, dtype=np.int16).astype(np.float32) / 32768.0
+                rms = float(np.sqrt(np.mean(audio_data**2)))
+                energy = float(np.sum(audio_data**2))
+                return rms > 0.01 and energy > 0.03
+            except:
+                return True  # Process if we can't analyze
         
-        # Calculate energy
-        energy = np.sum(audio_data**2)
-        
-        # Keep track of recent volumes for adaptive thresholding
-        self.recent_volumes.append(rms)
-        if len(self.recent_volumes) > self.max_history:
-            self.recent_volumes.pop(0)
-        
-        # Adaptive threshold based on recent audio
-        if len(self.recent_volumes) > 10:
-            avg_volume = np.mean(self.recent_volumes)
-            dynamic_threshold = max(self.volume_threshold, avg_volume * 0.6)
-        else:
-            dynamic_threshold = self.volume_threshold
-        
-        # Check if this frame meets our criteria for primary speaker
-        is_primary_speaker = (rms > dynamic_threshold and energy > self.energy_threshold)
-        
-        if is_primary_speaker:
-            logger.debug(f"Primary speaker detected - RMS: {rms:.4f}, Energy: {energy:.6f}")
-        
-        return is_primary_speaker
+        try:
+            # Convert audio data to numpy array
+            audio_data = np.frombuffer(audio_frame.data, dtype=np.int16).astype(np.float32) / 32768.0
+            
+            # Calculate basic audio features
+            rms = float(np.sqrt(np.mean(audio_data**2)))
+            energy = float(np.sum(audio_data**2))
+            
+            # Calculate spectral features for better speaker discrimination
+            spectral_features = self._calculate_spectral_features(audio_data)
+            
+            # Update rolling history
+            self.recent_volumes.append(rms)
+            self.recent_energies.append(energy)
+            self.recent_frequencies.append(spectral_features.get('dominant_frequency', 0))
+            
+            if len(self.recent_volumes) > self.max_history:
+                self.recent_volumes.pop(0)
+                self.recent_energies.pop(0)
+                self.recent_frequencies.pop(0)
+            
+            # Update background noise estimation
+            self._update_background_noise_estimation(rms, energy)
+            
+            # Establish or update primary speaker profile
+            self._establish_primary_speaker_profile(rms, energy, spectral_features)
+            
+            # Determine if this frame should be processed
+            if self.primary_speaker_established:
+                should_process = self._is_primary_speaker(rms, energy, spectral_features)
+            else:
+                # Before primary speaker is established, use more permissive basic thresholds
+                # This ensures we can pick up initial user speech to establish the profile
+                should_process = (rms > self.volume_threshold * 0.8 and  # Even more lenient
+                                energy > self.energy_threshold * 0.7 and  # More lenient
+                                rms > self.background_noise_level * 1.2)   # Much more lenient
+            
+            # Update statistics
+            if should_process:
+                self.primary_speaker_frames += 1
+            elif rms < self.background_noise_level * 1.5:
+                self.background_noise_frames += 1
+            else:
+                self.rejected_frames += 1
+            
+            # Log statistics periodically
+            if self.total_frames % 200 == 0:
+                self._log_filtering_stats()
+            
+            if should_process:
+                logger.debug(f"✅ Primary speaker audio - RMS: {rms:.4f}, Energy: {energy:.6f}, "
+                           f"Freq: {spectral_features.get('dominant_frequency', 0):.1f}Hz, "
+                           f"Established: {self.primary_speaker_established}")
+            else:
+                if self.total_frames % 100 == 0:  # Log rejections less frequently
+                    logger.debug(f"❌ Audio rejected - RMS: {rms:.4f} (thresh: {self.volume_threshold:.4f}), "
+                               f"Energy: {energy:.6f} (thresh: {self.energy_threshold:.6f}), "
+                               f"Noise: {self.background_noise_level:.4f}, "
+                               f"Established: {self.primary_speaker_established}")
+            
+            return bool(should_process)
+            
+        except Exception as e:
+            logger.error(f"Error in enhanced noise filtering: {e}")
+            # Fallback to basic processing
+            return True
+    
+    def _log_filtering_stats(self):
+        """Log detailed filtering statistics"""
+        if self.total_frames > 0:
+            primary_pct = (self.primary_speaker_frames / self.total_frames) * 100
+            noise_pct = (self.background_noise_frames / self.total_frames) * 100
+            rejected_pct = (self.rejected_frames / self.total_frames) * 100
+            
+            logger.info(f"Enhanced Noise Filter Stats - Total: {self.total_frames}, "
+                       f"Primary: {primary_pct:.1f}%, Background: {noise_pct:.1f}%, "
+                       f"Rejected: {rejected_pct:.1f}%, "
+                       f"Noise Level: {self.background_noise_level:.4f}, "
+                       f"Speaker Established: {self.primary_speaker_established}")
+    
+    def reset_primary_speaker(self):
+        """Reset the primary speaker profile (useful for new sessions)"""
+        self.primary_speaker_established = False
+        self.primary_speaker_volume_range = None
+        self.primary_speaker_energy_range = None
+        self.consistent_speaker_frames = 0
+        self.frames_since_primary_established = 0
+        logger.info("Primary speaker profile reset")
+    
+    def enable_basic_filtering(self):
+        """Enable basic filtering mode (fallback when enhanced filtering is too strict)"""
+        self.use_basic_filtering = True
+        logger.warning("🔄 Switched to basic filtering mode - enhanced filtering was too strict")
+    
+    def disable_basic_filtering(self):
+        """Disable basic filtering mode (return to enhanced filtering)"""
+        self.use_basic_filtering = False
+        logger.info("🎯 Switched back to enhanced filtering mode")
+    
+    def get_filtering_summary(self) -> dict:
+        """Get a summary of filtering performance"""
+        return {
+            'total_frames': self.total_frames,
+            'primary_speaker_frames': self.primary_speaker_frames,
+            'background_noise_frames': self.background_noise_frames,
+            'rejected_frames': self.rejected_frames,
+            'primary_speaker_established': self.primary_speaker_established,
+            'background_noise_level': self.background_noise_level,
+            'primary_speaker_percentage': (self.primary_speaker_frames / self.total_frames * 100) if self.total_frames > 0 else 0
+        }
 
 
-# Custom Agent with volume-based filtering using LiveKit's built-in session history
+# Custom Agent with enhanced noise filtering for telemedical examinations in noisy environments
 class VolumeFilteredAssistant(Agent):
+    """
+    Enhanced Voice Assistant with sophisticated noise filtering for telemedical examinations.
+    
+    Features:
+    - Primary speaker identification and tracking
+    - Background noise estimation and filtering  
+    - Spectral analysis for speaker discrimination
+    - Adaptive thresholds based on session characteristics
+    - Comprehensive noise filtering statistics
+    
+    This implementation is specifically designed for telemedical examinations where:
+    1. Multiple people may be present in the room
+    2. Background conversations need to be filtered out
+    3. Only the primary speaker (patient/family member) should be processed
+    4. Robust operation in noisy household environments is required
+    """
     def __init__(self, room_name: str = "unknown", family_details: str = "") -> None:
         
         # Family details section
@@ -684,7 +970,12 @@ class VolumeFilteredAssistant(Agent):
 """
         
         super().__init__(instructions=final_instructions)
-        self.volume_filter = VolumeBasedVAD(volume_threshold=0.025, energy_threshold=0.08)
+        self.enhanced_noise_filter = EnhancedNoiseFilter(
+            volume_threshold=0.015,      # Lower for better pickup
+            energy_threshold=0.05,       # Lower for better pickup  
+            consistency_threshold=2,     # Require only 2 consistent frames
+            speaker_change_sensitivity=0.3
+        )
         self.ignored_frames = 0
         self.processed_frames = 0
         
@@ -702,8 +993,25 @@ class VolumeFilteredAssistant(Agent):
         self._last_user_message_count = 0
     
     def should_process_audio(self, audio_frame: rtc.AudioFrame) -> bool:
-        """Filter audio based on volume to focus on primary speaker"""
-        should_process = self.volume_filter.should_process_audio(audio_frame)
+        """Filter audio based on enhanced noise filtering to focus on primary speaker"""
+        should_process = self.enhanced_noise_filter.should_process_audio(audio_frame)
+        
+        # Fallback: If enhanced filter hasn't established primary speaker after many frames, 
+        # use basic filtering to ensure we don't miss user input
+        total_frames = self.enhanced_noise_filter.total_frames
+        if (not self.enhanced_noise_filter.primary_speaker_established and 
+            total_frames > 500 and  # After 500 frames (~25 seconds)
+            total_frames % 100 == 0):  # Check periodically
+            
+            # Calculate basic audio characteristics for fallback
+            audio_data = np.frombuffer(audio_frame.data, dtype=np.int16).astype(np.float32) / 32768.0
+            rms = float(np.sqrt(np.mean(audio_data**2)))
+            energy = float(np.sum(audio_data**2))
+            
+            # Very basic threshold check as fallback
+            if rms > 0.01 and energy > 0.03:
+                should_process = True
+                logger.warning(f"🔄 Using fallback audio processing - no primary speaker established after {total_frames} frames")
         
         # Always record audio frames (even if not processing for STT)
         self.local_recorder.add_audio_frame(audio_frame)
@@ -715,10 +1023,13 @@ class VolumeFilteredAssistant(Agent):
         else:
             self.ignored_frames += 1
         
-        # Log statistics periodically
-        if (self.processed_frames + self.ignored_frames) % 100 == 0:
+        # Log statistics periodically with enhanced filtering info
+        if (self.processed_frames + self.ignored_frames) % 200 == 0:
             total = self.processed_frames + self.ignored_frames
-            logger.info(f"Audio filtering stats - Processed: {self.processed_frames}/{total} ({self.processed_frames/total*100:.1f}%)")
+            filtering_summary = self.enhanced_noise_filter.get_filtering_summary()
+            logger.info(f"Enhanced Audio Filtering Stats - Processed: {self.processed_frames}/{total} ({self.processed_frames/total*100:.1f}%), "
+                       f"Primary Speaker Established: {filtering_summary['primary_speaker_established']}, "
+                       f"Background Noise Level: {filtering_summary['background_noise_level']:.4f}")
         
         return should_process
     
@@ -735,6 +1046,32 @@ class VolumeFilteredAssistant(Agent):
         """Stop monitoring for user silence"""
         self.silence_detector.stop_monitoring()
         logger.info("Stopped silence monitoring")
+    
+    def reset_noise_filter(self):
+        """Reset the enhanced noise filter for a new session"""
+        self.enhanced_noise_filter.reset_primary_speaker()
+        logger.info("Enhanced noise filter reset for new session")
+    
+    def enable_basic_audio_filtering(self):
+        """Enable basic filtering if enhanced filtering is too strict"""
+        self.enhanced_noise_filter.enable_basic_filtering()
+        logger.warning("Switched to basic audio filtering mode")
+    
+    def disable_basic_audio_filtering(self):
+        """Disable basic filtering and return to enhanced filtering"""
+        self.enhanced_noise_filter.disable_basic_filtering()
+        logger.info("Returned to enhanced audio filtering mode")
+    
+    def get_noise_filtering_stats(self) -> dict:
+        """Get comprehensive noise filtering statistics"""
+        basic_stats = {
+            'total_audio_frames': self.processed_frames + self.ignored_frames,
+            'processed_frames': self.processed_frames,
+            'ignored_frames': self.ignored_frames,
+            'processing_rate': (self.processed_frames / (self.processed_frames + self.ignored_frames) * 100) if (self.processed_frames + self.ignored_frames) > 0 else 0
+        }
+        enhanced_stats = self.enhanced_noise_filter.get_filtering_summary()
+        return {**basic_stats, **enhanced_stats}
         
     async def check_and_handle_silence(self) -> bool:
         """Check for silence and send prompt if needed. Returns True if session should end."""
@@ -1523,7 +1860,12 @@ async def entrypoint(ctx: agents.JobContext):
         stt=sarvam.STT(language="hi-IN", model="saarika:v2.5"),
         llm=openai.LLM(model="gpt-4o"),
         tts=sarvam.TTS(target_language_code="hi-IN", speaker="anushka", http_session=http_session),
-        vad=ctx.proc.userdata.get("vad") or silero.VAD.load(activation_threshold=0.85, min_silence_duration=0.8),
+        # Enhanced VAD configuration for noisy environments - prioritizes primary speaker but not too aggressive
+        vad=ctx.proc.userdata.get("vad") or silero.VAD.load(
+            activation_threshold=0.75,   # Reduced from 0.85 for better pickup
+            min_silence_duration=0.8,   # Reduced from 1.0 for more responsiveness
+            min_speech_duration=0.2,    # Reduced from 0.3 for faster activation
+        ),
         turn_detection=MultilingualModel(),
     )
 
@@ -1534,6 +1876,9 @@ async def entrypoint(ctx: agents.JobContext):
 
     # Set the session reference in the agent for silence prompts
     agent._session = session  # Store session reference directly
+    
+    # Reset and prepare the enhanced noise filter for the new session
+    agent.reset_noise_filter()
     
     # Start silence monitoring task
     silence_monitoring_task = None
@@ -1572,6 +1917,16 @@ async def entrypoint(ctx: agents.JobContext):
     async def cleanup_and_record():
         nonlocal recording_egress_id, recording_s3_url, silence_monitoring_task
         logger.info("Session ending, generating transcript and summary...")
+        
+        # Log final noise filtering statistics
+        noise_stats = agent.get_noise_filtering_stats()
+        logger.info(f"Final Enhanced Noise Filtering Performance:")
+        logger.info(f"  - Total Audio Frames: {noise_stats['total_audio_frames']}")
+        logger.info(f"  - Primary Speaker Frames: {noise_stats['primary_speaker_frames']} ({noise_stats.get('primary_speaker_percentage', 0):.1f}%)")
+        logger.info(f"  - Background Noise Frames: {noise_stats['background_noise_frames']}")
+        logger.info(f"  - Rejected Frames: {noise_stats['rejected_frames']}")
+        logger.info(f"  - Primary Speaker Established: {noise_stats['primary_speaker_established']}")
+        logger.info(f"  - Final Background Noise Level: {noise_stats['background_noise_level']:.4f}")
         
         # Stop silence monitoring
         if silence_monitoring_task:
@@ -1670,12 +2025,16 @@ async def entrypoint(ctx: agents.JobContext):
 
 
 def prewarm(proc: agents.JobProcess):
-    """Prewarm VAD model to improve startup times"""
+    """Prewarm VAD model to improve startup times with balanced noise filtering configuration"""
+    # Balanced VAD configuration for noisy environments
+    # Not too aggressive to ensure user voice pickup while still filtering background noise
     proc.userdata["vad"] = silero.VAD.load(
-        activation_threshold=0.6,  # Higher threshold for primary speaker (matching NOISY_CONFIG)
-        min_silence_duration=0.8,
-        min_speech_duration=0.15,  # Require longer speech to activate
+        activation_threshold=0.7,    # Reduced from 0.8 for better user voice pickup
+        min_silence_duration=1.0,   # Reduced from 1.2 for better responsiveness
+        min_speech_duration=0.2,    # Reduced from 0.25 for faster activation
+        # These settings balance noise filtering with user voice pickup
     )
+    logger.info("VAD prewarmed with balanced noise filtering configuration for telemedical examination")
 
 
 if __name__ == "__main__":
