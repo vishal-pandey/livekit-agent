@@ -298,6 +298,14 @@ class SilenceDetector:
         self.last_user_activity = time.time()
         self.prompt_count = 0
         
+    def reset_activity_for_any_message(self):
+        """Reset the timer for any activity (user or agent messages)"""
+        current_time = time.time()
+        time_since_last_activity = current_time - self.last_user_activity
+        self.last_user_activity = current_time
+        self.prompt_count = 0
+        logger.debug(f"🔄 Activity detected - reset silence timer (was silent for {time_since_last_activity:.1f}s)")
+        
     def start_monitoring(self):
         """Start monitoring for silence"""
         self.is_monitoring = True
@@ -984,13 +992,14 @@ class VolumeFilteredAssistant(Agent):
         
         # Initialize silence detector
         self.silence_detector = SilenceDetector(
-            silence_timeout=10.0,  # 10 seconds of silence before first prompt
-            prompt_interval=10.0   # 10 seconds between subsequent prompts
+            silence_timeout=20.0,  # 10 seconds of silence before first prompt
+            prompt_interval=20.0   # 10 seconds between subsequent prompts
         )
         
         # Session reference to send prompts
         self._session: Optional[AgentSession] = None
         self._last_user_message_count = 0
+        self._last_agent_message_count = 0  # Track agent messages as activity too
     
     def should_process_audio(self, audio_frame: rtc.AudioFrame) -> bool:
         """Filter audio based on enhanced noise filtering to focus on primary speaker"""
@@ -1018,8 +1027,8 @@ class VolumeFilteredAssistant(Agent):
         
         if should_process:
             self.processed_frames += 1
-            # Reset silence detector when user speaks
-            self.silence_detector.reset_user_activity()
+            # Reset silence detector when user speaks (using universal activity reset)
+            self.silence_detector.reset_activity_for_any_message()
         else:
             self.ignored_frames += 1
         
@@ -1081,6 +1090,9 @@ class VolumeFilteredAssistant(Agent):
             if self._session:
                 logger.info(f"Sending silence prompt (count: {self.silence_detector.prompt_count + 1}): {prompt_message}")
                 await self._session.say(prompt_message)
+                # Reset activity timer since agent just spoke
+                self.silence_detector.reset_activity_for_any_message()
+                logger.debug("🤖 Silence prompt sent - reset activity timer")
                 
             self.silence_detector.mark_prompt_sent()
             
@@ -1089,6 +1101,9 @@ class VolumeFilteredAssistant(Agent):
                 logger.warning("Maximum silence prompts reached, ending session")
                 if self._session:
                     await self._session.say("मुझे लगता है आप वहाँ नहीं हैं। मैं यह सेशन समाप्त कर रही हूँ। धन्यवाद!")
+                    # Reset activity timer for the final message too
+                    self.silence_detector.reset_activity_for_any_message()
+                    logger.debug("🤖 Final message sent - reset activity timer")
                 return True
                 
         return False
@@ -1894,20 +1909,42 @@ async def entrypoint(ctx: agents.JobContext):
                     # The cleanup will be handled by the session end callback
                     break
                     
-                # Also check for new user messages in session history to reset activity timer
+                # Check for both user and agent messages in session history to reset activity timer
                 if hasattr(session, 'history') and session.history:
                     history_dict = session.history.to_dict()
-                    user_messages = [item for item in history_dict.get('items', []) if item.get('role') == 'user']
+                    all_items = history_dict.get('items', [])
                     
-                    # If we have more user messages than before, reset the activity timer
-                    current_user_message_count = len(user_messages)
+                    # Filter user and agent messages (check for multiple possible agent role names)
+                    user_messages = [item for item in all_items if item.get('role') in ['user']]
+                    agent_messages = [item for item in all_items if item.get('role') in ['agent', 'assistant', 'system']]
+                    
+                    # Debug: Log all roles we see (only every 20 checks to avoid spam)
+                    if len(all_items) > 0 and (len(all_items) % 20 == 0):
+                        unique_roles = set(item.get('role', 'unknown') for item in all_items)
+                        logger.debug(f"Session history roles detected: {unique_roles}, Total items: {len(all_items)}")
+                    
+                    # Initialize counters if they don't exist
                     if not hasattr(agent, '_last_user_message_count'):
                         agent._last_user_message_count = 0
+                    if not hasattr(agent, '_last_agent_message_count'):
+                        agent._last_agent_message_count = 0
                     
+                    # Check for new user messages
+                    current_user_message_count = len(user_messages)
                     if current_user_message_count > agent._last_user_message_count:
-                        agent.silence_detector.reset_user_activity()
-                        logger.debug(f"User activity detected via session history - reset silence timer")
+                        agent.silence_detector.reset_activity_for_any_message()
+                        logger.debug(f"✅ User message detected - reset silence timer (count: {current_user_message_count})")
                         agent._last_user_message_count = current_user_message_count
+                    
+                    # Check for new agent messages (agent speaking = activity)
+                    current_agent_message_count = len(agent_messages)
+                    if current_agent_message_count > agent._last_agent_message_count:
+                        agent.silence_detector.reset_activity_for_any_message()
+                        logger.debug(f"🤖 Agent message detected - reset silence timer (count: {current_agent_message_count})")
+                        agent._last_agent_message_count = current_agent_message_count
+                        
+                        # Add a small buffer to ensure agent is done speaking before resuming silence monitoring
+                        await asyncio.sleep(2.0)  # Give agent extra time to finish speaking
                 
                 await asyncio.sleep(5)  # Check every 5 seconds
             except Exception as e:
