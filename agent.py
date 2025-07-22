@@ -282,16 +282,81 @@ mongo_manager = MongoDBManager()
 
 
 class SilenceDetector:
-    """Detects prolonged user silence and triggers prompts"""
+    """
+    Detects prolonged user silence and triggers prompts with dynamic timeout based on agent response length.
     
-    def __init__(self, silence_timeout: float = 30.0, prompt_interval: float = 30.0):
-        self.silence_timeout = silence_timeout  # Time in seconds before first prompt
+    Features:
+    - Dynamic timeout calculation based on agent message word count
+    - Automatic timeout adjustment for longer/shorter agent responses  
+    - Configurable speaking rate and buffer time
+    - Min/max timeout constraints for safety
+    - Statistics tracking for monitoring timeout behavior
+    
+    The dynamic timeout works by:
+    1. Counting words in agent messages
+    2. Calculating estimated speaking time (words / speaking_rate)
+    3. Adding buffer time for user processing (speaking_time * buffer_multiplier)  
+    4. Applying min/max constraints
+    5. Using this timeout until next activity is detected
+    """
+    
+    def __init__(self, base_silence_timeout: float = 20.0, prompt_interval: float = 20.0):
+        self.base_silence_timeout = base_silence_timeout  # Base timeout for silence detection
+        self.current_silence_timeout = base_silence_timeout  # Current dynamic timeout
         self.prompt_interval = prompt_interval  # Time between subsequent prompts
         self.last_user_activity = time.time()
         self.last_prompt_time = 0
         self.is_monitoring = False
         self.prompt_count = 0
         self.max_prompts = 3  # Maximum number of silence prompts before giving up
+        
+        # Dynamic timeout configuration
+        self.min_timeout = 10.0  # Minimum timeout regardless of word count
+        self.max_timeout = 60.0  # Maximum timeout regardless of word count
+        self.words_per_second = 2.5  # Average speaking rate in Hindi/Hinglish (words per second)
+        self.buffer_multiplier = 1.5  # Extra buffer time (50% more than speaking time)
+        
+    def calculate_dynamic_timeout_from_message(self, message_content: str) -> float:
+        """
+        Calculate dynamic silence timeout based on agent message word count.
+        
+        Args:
+            message_content: The agent's message content
+            
+        Returns:
+            Calculated timeout in seconds
+        """
+        if not message_content:
+            return self.base_silence_timeout
+        
+        # Count words in the message
+        word_count = len(message_content.split())
+        
+        # Calculate estimated speaking time
+        speaking_time = word_count / self.words_per_second
+        
+        # Add buffer time for user to process and respond
+        timeout_with_buffer = speaking_time * self.buffer_multiplier
+        
+        # Apply min/max constraints
+        dynamic_timeout = max(self.min_timeout, min(self.max_timeout, timeout_with_buffer))
+        
+        logger.debug(f"📊 Dynamic timeout calculation - Words: {word_count}, "
+                    f"Speaking time: {speaking_time:.1f}s, "
+                    f"Timeout with buffer: {timeout_with_buffer:.1f}s, "
+                    f"Final timeout: {dynamic_timeout:.1f}s")
+        
+        return dynamic_timeout
+    
+    def set_dynamic_timeout(self, timeout: float):
+        """Set the current dynamic timeout"""
+        self.current_silence_timeout = max(self.min_timeout, min(self.max_timeout, timeout))
+        logger.debug(f"🔄 Silence timeout updated to {self.current_silence_timeout:.1f}s")
+    
+    def reset_to_base_timeout(self):
+        """Reset timeout to base value"""
+        self.current_silence_timeout = self.base_silence_timeout
+        logger.debug(f"🔄 Silence timeout reset to base value: {self.base_silence_timeout:.1f}s")
         
     def reset_user_activity(self):
         """Reset the timer when user speaks"""
@@ -304,7 +369,26 @@ class SilenceDetector:
         time_since_last_activity = current_time - self.last_user_activity
         self.last_user_activity = current_time
         self.prompt_count = 0
-        logger.debug(f"🔄 Activity detected - reset silence timer (was silent for {time_since_last_activity:.1f}s)")
+        
+        # Reset to base timeout when activity is detected (user responds)
+        if self.current_silence_timeout != self.base_silence_timeout:
+            logger.debug(f"🔄 Activity detected - reset silence timer and timeout "
+                        f"(was silent for {time_since_last_activity:.1f}s, "
+                        f"timeout was {self.current_silence_timeout:.1f}s, now {self.base_silence_timeout:.1f}s)")
+            self.current_silence_timeout = self.base_silence_timeout
+        else:
+            logger.debug(f"🔄 Activity detected - reset silence timer (was silent for {time_since_last_activity:.1f}s)")
+        
+    def get_timeout_stats(self) -> dict:
+        """Get current timeout statistics"""
+        return {
+            'base_timeout': self.base_silence_timeout,
+            'current_timeout': self.current_silence_timeout,
+            'min_timeout': self.min_timeout,
+            'max_timeout': self.max_timeout,
+            'words_per_second': self.words_per_second,
+            'buffer_multiplier': self.buffer_multiplier
+        }
         
     def start_monitoring(self):
         """Start monitoring for silence"""
@@ -326,9 +410,9 @@ class SilenceDetector:
         time_since_activity = current_time - self.last_user_activity
         time_since_last_prompt = current_time - self.last_prompt_time
         
-        # First prompt after initial silence timeout
+        # First prompt after initial silence timeout (using dynamic timeout)
         if (self.prompt_count == 0 and 
-            time_since_activity >= self.silence_timeout):
+            time_since_activity >= self.current_silence_timeout):
             return True
             
         # Subsequent prompts after prompt interval
@@ -992,8 +1076,8 @@ class VolumeFilteredAssistant(Agent):
         
         # Initialize silence detector
         self.silence_detector = SilenceDetector(
-            silence_timeout=20.0,  # 10 seconds of silence before first prompt
-            prompt_interval=20.0   # 10 seconds between subsequent prompts
+            base_silence_timeout=20.0,  # Base timeout for silence detection
+            prompt_interval=20.0   # Time between subsequent prompts
         )
         
         # Session reference to send prompts
@@ -1032,13 +1116,15 @@ class VolumeFilteredAssistant(Agent):
         else:
             self.ignored_frames += 1
         
-        # Log statistics periodically with enhanced filtering info
+        # Log statistics periodically with enhanced filtering info and timeout stats
         if (self.processed_frames + self.ignored_frames) % 200 == 0:
             total = self.processed_frames + self.ignored_frames
             filtering_summary = self.enhanced_noise_filter.get_filtering_summary()
+            timeout_stats = self.get_silence_timeout_stats()
             logger.info(f"Enhanced Audio Filtering Stats - Processed: {self.processed_frames}/{total} ({self.processed_frames/total*100:.1f}%), "
                        f"Primary Speaker Established: {filtering_summary['primary_speaker_established']}, "
-                       f"Background Noise Level: {filtering_summary['background_noise_level']:.4f}")
+                       f"Background Noise Level: {filtering_summary['background_noise_level']:.4f}, "
+                       f"Silence Timeout: {timeout_stats['current_silence_timeout']:.1f}s/{timeout_stats['base_timeout']:.1f}s")
         
         return should_process
     
@@ -1082,13 +1168,34 @@ class VolumeFilteredAssistant(Agent):
         enhanced_stats = self.enhanced_noise_filter.get_filtering_summary()
         return {**basic_stats, **enhanced_stats}
         
+    def get_silence_timeout_stats(self) -> dict:
+        """Get silence timeout statistics for monitoring"""
+        basic_stats = {
+            'current_silence_timeout': self.silence_detector.current_silence_timeout,
+            'base_timeout': self.silence_detector.base_silence_timeout,
+            'is_monitoring': self.silence_detector.is_monitoring,
+            'prompt_count': self.silence_detector.prompt_count
+        }
+        timeout_stats = self.silence_detector.get_timeout_stats()
+        return {**basic_stats, **timeout_stats}
+        
+    def set_dynamic_silence_timeout_for_message(self, message: str):
+        """Set dynamic silence timeout based on a message that the agent is about to send"""
+        dynamic_timeout = self.silence_detector.calculate_dynamic_timeout_from_message(message)
+        self.silence_detector.set_dynamic_timeout(dynamic_timeout)
+        logger.debug(f"🤖 Pre-set dynamic timeout {dynamic_timeout:.1f}s for outgoing message")
+        
     async def check_and_handle_silence(self) -> bool:
         """Check for silence and send prompt if needed. Returns True if session should end."""
         if self.silence_detector.should_prompt_user():
             prompt_message = self.silence_detector.get_prompt_message()
             
             if self._session:
-                logger.info(f"Sending silence prompt (count: {self.silence_detector.prompt_count + 1}): {prompt_message}")
+                # Set dynamic timeout for the prompt message before sending
+                self.set_dynamic_silence_timeout_for_message(prompt_message)
+                
+                logger.info(f"Sending silence prompt (count: {self.silence_detector.prompt_count + 1}, "
+                           f"timeout: {self.silence_detector.current_silence_timeout:.1f}s): {prompt_message}")
                 await self._session.say(prompt_message)
                 # Reset activity timer since agent just spoke
                 self.silence_detector.reset_activity_for_any_message()
@@ -1100,7 +1207,10 @@ class VolumeFilteredAssistant(Agent):
             if self.silence_detector.should_end_session():
                 logger.warning("Maximum silence prompts reached, ending session")
                 if self._session:
-                    await self._session.say("मुझे लगता है आप वहाँ नहीं हैं। मैं यह सेशन समाप्त कर रही हूँ। धन्यवाद!")
+                    final_message = "मुझे लगता है आप वहाँ नहीं हैं। मैं यह सेशन समाप्त कर रही हूँ। धन्यवाद!"
+                    # Set dynamic timeout for final message
+                    self.set_dynamic_silence_timeout_for_message(final_message)
+                    await self._session.say(final_message)
                     # Reset activity timer for the final message too
                     self.silence_detector.reset_activity_for_any_message()
                     logger.debug("🤖 Final message sent - reset activity timer")
@@ -1939,11 +2049,30 @@ async def entrypoint(ctx: agents.JobContext):
                     # Check for new agent messages (agent speaking = activity)
                     current_agent_message_count = len(agent_messages)
                     if current_agent_message_count > agent._last_agent_message_count:
+                        # Get the latest agent message for dynamic timeout calculation
+                        latest_agent_message = agent_messages[-1] if agent_messages else None
+                        agent_message_content = ""
+                        
+                        if latest_agent_message:
+                            content = latest_agent_message.get('content', [])
+                            if isinstance(content, list):
+                                agent_message_content = " ".join(str(item) for item in content)
+                            else:
+                                agent_message_content = str(content)
+                        
+                        # Calculate dynamic timeout based on agent message word count
+                        dynamic_timeout = agent.silence_detector.calculate_dynamic_timeout_from_message(agent_message_content)
+                        agent.silence_detector.set_dynamic_timeout(dynamic_timeout)
+                        
+                        # Reset activity timer
                         agent.silence_detector.reset_activity_for_any_message()
-                        logger.debug(f"🤖 Agent message detected - reset silence timer (count: {current_agent_message_count})")
+                        logger.debug(f"🤖 Agent message detected - reset silence timer with dynamic timeout "
+                                   f"{dynamic_timeout:.1f}s (count: {current_agent_message_count}, "
+                                   f"words: {len(agent_message_content.split()) if agent_message_content else 0})")
                         agent._last_agent_message_count = current_agent_message_count
                         
                         # Add a small buffer to ensure agent is done speaking before resuming silence monitoring
+                        # The buffer time is now included in the dynamic timeout calculation
                         await asyncio.sleep(2.0)  # Give agent extra time to finish speaking
                 
                 await asyncio.sleep(5)  # Check every 5 seconds
@@ -1988,7 +2117,11 @@ async def entrypoint(ctx: agents.JobContext):
     
     await ctx.connect()
 
-    await session.say("नमस्ते! मैं आपका तेलीमेडिकल एग्जामिनेशन असिस्टेंट हूँ। मैं आपसे कुछ मेडिकल सवाल पूछूंगी। क्या आप तैयार हैं?")
+    initial_greeting = "नमस्ते! मैं आपका तेलीमेडिकल एग्जामिनेशन असिस्टेंट हूँ। मैं आपसे कुछ मेडिकल सवाल पूछूंगी। क्या आप तैयार हैं?"
+    
+    # Set dynamic timeout for the initial greeting
+    agent.set_dynamic_silence_timeout_for_message(initial_greeting)
+    await session.say(initial_greeting)
 
     # Wait for participant and let the session run naturally
     logger.info("Agent is running and waiting for participants...")
