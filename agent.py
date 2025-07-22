@@ -25,6 +25,7 @@ import google.generativeai as genai  # Import the Google Generative AI SDK
 import wave  # For WAV file creation
 from motor.motor_asyncio import AsyncIOMotorClient  # MongoDB async client
 from datetime import datetime, timezone
+import time
 
 logger = logging.getLogger("hindi-voice-agent")
 
@@ -278,6 +279,75 @@ class MongoDBManager:
 
 # Global MongoDB manager instance
 mongo_manager = MongoDBManager()
+
+
+class SilenceDetector:
+    """Detects prolonged user silence and triggers prompts"""
+    
+    def __init__(self, silence_timeout: float = 30.0, prompt_interval: float = 30.0):
+        self.silence_timeout = silence_timeout  # Time in seconds before first prompt
+        self.prompt_interval = prompt_interval  # Time between subsequent prompts
+        self.last_user_activity = time.time()
+        self.last_prompt_time = 0
+        self.is_monitoring = False
+        self.prompt_count = 0
+        self.max_prompts = 3  # Maximum number of silence prompts before giving up
+        
+    def reset_user_activity(self):
+        """Reset the timer when user speaks"""
+        self.last_user_activity = time.time()
+        self.prompt_count = 0
+        
+    def start_monitoring(self):
+        """Start monitoring for silence"""
+        self.is_monitoring = True
+        self.last_user_activity = time.time()
+        self.last_prompt_time = 0
+        self.prompt_count = 0
+        
+    def stop_monitoring(self):
+        """Stop monitoring for silence"""
+        self.is_monitoring = False
+        
+    def should_prompt_user(self) -> bool:
+        """Check if we should prompt the user due to silence"""
+        if not self.is_monitoring:
+            return False
+            
+        current_time = time.time()
+        time_since_activity = current_time - self.last_user_activity
+        time_since_last_prompt = current_time - self.last_prompt_time
+        
+        # First prompt after initial silence timeout
+        if (self.prompt_count == 0 and 
+            time_since_activity >= self.silence_timeout):
+            return True
+            
+        # Subsequent prompts after prompt interval
+        if (self.prompt_count > 0 and 
+            self.prompt_count < self.max_prompts and
+            time_since_last_prompt >= self.prompt_interval):
+            return True
+            
+        return False
+        
+    def mark_prompt_sent(self):
+        """Mark that a prompt was sent"""
+        self.last_prompt_time = time.time()
+        self.prompt_count += 1
+        
+    def should_end_session(self) -> bool:
+        """Check if we should end the session due to too many silence prompts"""
+        return self.prompt_count >= self.max_prompts
+        
+    def get_prompt_message(self) -> str:
+        """Get appropriate prompt message based on prompt count"""
+        if self.prompt_count == 0:
+            return "क्या आप वहाँ हैं? क्या आप मेडिकल एग्जामिनेशन जारी रखना चाहते हैं?"
+        elif self.prompt_count == 1:
+            return "मुझे लगता है आप मुझे सुन नहीं पा रहे। कृपया बताएं कि क्या आप तैयार हैं?"
+        else:
+            return "अगर आप वहाँ नहीं हैं तो मैं यह सेशन समाप्त कर दूंगी। कृपया जवाब दें।"
 
 
 class VolumeBasedVAD:
@@ -620,6 +690,16 @@ class VolumeFilteredAssistant(Agent):
         
         # Initialize local audio recorder as fallback
         self.local_recorder = LocalAudioRecorder(room_name)
+        
+        # Initialize silence detector
+        self.silence_detector = SilenceDetector(
+            silence_timeout=30.0,  # 30 seconds of silence before first prompt
+            prompt_interval=30.0   # 30 seconds between subsequent prompts
+        )
+        
+        # Session reference to send prompts
+        self._session: Optional[AgentSession] = None
+        self._last_user_message_count = 0
     
     def should_process_audio(self, audio_frame: rtc.AudioFrame) -> bool:
         """Filter audio based on volume to focus on primary speaker"""
@@ -630,6 +710,8 @@ class VolumeFilteredAssistant(Agent):
         
         if should_process:
             self.processed_frames += 1
+            # Reset silence detector when user speaks
+            self.silence_detector.reset_user_activity()
         else:
             self.ignored_frames += 1
         
@@ -639,6 +721,40 @@ class VolumeFilteredAssistant(Agent):
             logger.info(f"Audio filtering stats - Processed: {self.processed_frames}/{total} ({self.processed_frames/total*100:.1f}%)")
         
         return should_process
+    
+    def set_session(self, session):
+        """Set the session reference for sending prompts"""
+        self._session = session
+        
+    def start_silence_monitoring(self):
+        """Start monitoring for user silence"""
+        self.silence_detector.start_monitoring()
+        logger.info("Started silence monitoring")
+        
+    def stop_silence_monitoring(self):
+        """Stop monitoring for user silence"""
+        self.silence_detector.stop_monitoring()
+        logger.info("Stopped silence monitoring")
+        
+    async def check_and_handle_silence(self) -> bool:
+        """Check for silence and send prompt if needed. Returns True if session should end."""
+        if self.silence_detector.should_prompt_user():
+            prompt_message = self.silence_detector.get_prompt_message()
+            
+            if self._session:
+                logger.info(f"Sending silence prompt (count: {self.silence_detector.prompt_count + 1}): {prompt_message}")
+                await self._session.say(prompt_message)
+                
+            self.silence_detector.mark_prompt_sent()
+            
+            # Check if we should end the session after too many prompts
+            if self.silence_detector.should_end_session():
+                logger.warning("Maximum silence prompts reached, ending session")
+                if self._session:
+                    await self._session.say("मुझे लगता है आप वहाँ नहीं हैं। मैं यह सेशन समाप्त कर रही हूँ। धन्यवाद!")
+                return True
+                
+        return False
 
 
 class LocalAudioRecorder:
@@ -1416,9 +1532,52 @@ async def entrypoint(ctx: agents.JobContext):
     agent = VolumeFilteredAssistant(room_name=room_name, family_details=family_details)
     recording_started = False
 
+    # Set the session reference in the agent for silence prompts
+    agent._session = session  # Store session reference directly
+    
+    # Start silence monitoring task
+    silence_monitoring_task = None
+
+    async def silence_monitor():
+        """Background task to monitor for silence and send prompts"""
+        while True:
+            try:
+                should_end = await agent.check_and_handle_silence()
+                if should_end:
+                    logger.info("Session ended due to prolonged silence")
+                    # End the session gracefully by breaking the loop
+                    # The cleanup will be handled by the session end callback
+                    break
+                    
+                # Also check for new user messages in session history to reset activity timer
+                if hasattr(session, 'history') and session.history:
+                    history_dict = session.history.to_dict()
+                    user_messages = [item for item in history_dict.get('items', []) if item.get('role') == 'user']
+                    
+                    # If we have more user messages than before, reset the activity timer
+                    current_user_message_count = len(user_messages)
+                    if not hasattr(agent, '_last_user_message_count'):
+                        agent._last_user_message_count = 0
+                    
+                    if current_user_message_count > agent._last_user_message_count:
+                        agent.silence_detector.reset_user_activity()
+                        logger.debug(f"User activity detected via session history - reset silence timer")
+                        agent._last_user_message_count = current_user_message_count
+                
+                await asyncio.sleep(5)  # Check every 5 seconds
+            except Exception as e:
+                logger.error(f"Error in silence monitoring: {e}")
+                await asyncio.sleep(5)
+
     async def cleanup_and_record():
-        nonlocal recording_egress_id, recording_s3_url
+        nonlocal recording_egress_id, recording_s3_url, silence_monitoring_task
         logger.info("Session ending, generating transcript and summary...")
+        
+        # Stop silence monitoring
+        if silence_monitoring_task:
+            silence_monitoring_task.cancel()
+            
+        agent.stop_silence_monitoring()
         
         if recording_egress_id:
             logger.info("Stopping LiveKit Egress room recording...")
@@ -1475,6 +1634,10 @@ async def entrypoint(ctx: agents.JobContext):
             # Additional delay to ensure audio is stable
             await asyncio.sleep(1.0)
             
+            # Start silence monitoring once user has spoken
+            logger.info("Starting silence monitoring...")
+            agent.start_silence_monitoring()
+            
             logger.info("Attempting to start LiveKit Egress room recording...")
             recording_result = await start_room_recording(ctx.room.name)
             if recording_result:
@@ -1493,6 +1656,12 @@ async def entrypoint(ctx: agents.JobContext):
     
     # Start the recording task in background
     recording_task = asyncio.create_task(start_recording_after_user_speech())
+    
+    # Wait a bit for the initial setup
+    await asyncio.sleep(2.0)
+    
+    # Start the silence monitoring task after initial setup
+    silence_monitoring_task = asyncio.create_task(silence_monitor())
     
     # Keep the agent alive until the session ends
     await asyncio.sleep(0.1)  # Small delay to ensure everything is set up
