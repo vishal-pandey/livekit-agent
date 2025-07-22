@@ -47,13 +47,74 @@ POLICY_COLLECTIONS = {
 
 
 class MongoDBManager:
-    """Manages MongoDB operations for storing session data"""
+    """
+    Manages MongoDB operations for storing session data.
+    
+    All database operations use proposalNo as the primary key for upserting:
+    - Extracts proposalNo from room_name (handles formats like 'voice_assistant_room_123', 'room_456', or plain '789')
+    - Uses upsert operations to create new records or update existing ones based on proposalNo
+    - Maintains consistency across call_sessions, transcripts, and medical_summaries collections
+    - Stores original room_name in roomName field while using clean proposalNo for indexing
+    - Captures complete call session data including customer details, call metadata, and recording paths
+    """
     
     def __init__(self):
         self.client = None
         self.database = None
         self.policy_database = None
         
+    def _extract_proposal_no(self, room_name: str) -> str:
+        """
+        Extract proposal number from room name.
+        Handles different room name formats and returns clean proposal number.
+        
+        Examples:
+        - 'voice_assistant_room_123' -> '123'
+        - 'room_456' -> '456' 
+        - '789' -> '789'
+        """
+        proposal_no = room_name
+        if "voice_assistant_room_" in room_name:
+            proposal_no = room_name.replace("voice_assistant_room_", "")
+        elif "room_" in room_name:
+            proposal_no = room_name.replace("room_", "")
+        return proposal_no
+        
+    def _extract_customer_info(self, family_data: Optional[dict]) -> tuple[Optional[str], Optional[str]]:
+        """
+        Extract customer name and phone from family data.
+        Returns tuple of (customer_name, customer_phone)
+        """
+        if not family_data:
+            return None, None
+            
+        customer_name = None
+        customer_phone = None
+        
+        # Try to get customer info from main fields (different possible field names)
+        customer_name = (family_data.get('customerName') or 
+                        family_data.get('proposerName') or 
+                        family_data.get('policyHolderName'))
+        
+        customer_phone = (family_data.get('customerPhone') or 
+                         family_data.get('proposerPhone') or 
+                         family_data.get('proposerMobile') or
+                         family_data.get('policyHolderPhone'))
+        
+        # If not found in main fields, try to get from first member details
+        if not customer_name and family_data.get('memberDetails'):
+            member_details = family_data.get('memberDetails', [])
+            if member_details:
+                first_member = member_details[0]
+                basic_info = first_member.get('basicInfo', {})
+                customer_name = basic_info.get('name')
+                # Phone might be in contact info
+                contact_info = first_member.get('contactInfo', {})
+                if not customer_phone:
+                    customer_phone = contact_info.get('phone') or contact_info.get('mobile')
+        
+        return customer_name, customer_phone
+
     async def connect(self):
         """Connect to MongoDB"""
         try:
@@ -85,86 +146,105 @@ class MongoDBManager:
     
     async def update_call_session(self, room_name: str, recording_url: Optional[str] = None, 
                                 status: str = "completed", duration: Optional[str] = None,
-                                transcript_confidence: Optional[int] = None):
-        """Update call session record with recording path and metadata"""
+                                transcript_confidence: Optional[int] = None,
+                                customer_name: Optional[str] = None,
+                                customer_phone: Optional[str] = None,
+                                language: str = "hindi"):
+        """Update or create call session record with recording path and metadata using proposalNo as key"""
         try:
             if self.database is None:
                 logger.error("Database not connected")
                 return False
                 
-            # Extract proposal number from room name
-            # Handle different room name formats
-            proposal_no = room_name
-            if "voice_assistant_room_" in room_name:
-                proposal_no = room_name.replace("voice_assistant_room_", "")
-            elif "room_" in room_name:
-                proposal_no = room_name.replace("room_", "")
+            # Extract proposal number from room name using helper method
+            proposal_no = self._extract_proposal_no(room_name)
             
-            logger.info(f"Mapping room '{room_name}' to proposal '{proposal_no}'")
+            logger.info(f"Upserting call session for proposal '{proposal_no}' (room: '{room_name}')")
             
-            update_data = {
+            # Prepare the record data for upsert with all required fields
+            call_session_record = {
+                "proposalNo": proposal_no,
+                "roomName": room_name,  # Store original room name, not the cleaned proposal number
                 "status": status,
+                "language": language,
+                "callDate": datetime.now(timezone.utc),  # Set call date to current time
                 "updatedAt": datetime.now(timezone.utc)
             }
             
+            # Add optional fields if provided
             if recording_url:
-                update_data["recordingPath"] = recording_url
+                call_session_record["recordingPath"] = recording_url
             if duration:
-                update_data["duration"] = duration
+                call_session_record["duration"] = duration
             if transcript_confidence:
-                update_data["transcriptConfidence"] = transcript_confidence
+                call_session_record["transcriptConfidence"] = transcript_confidence
+            if customer_name:
+                call_session_record["customerName"] = customer_name
+            if customer_phone:
+                call_session_record["customerPhone"] = customer_phone
+            
+            # Set createdAt only when creating new records
+            update_operation = {
+                "$set": call_session_record,
+                "$setOnInsert": {
+                    "createdAt": datetime.now(timezone.utc)
+                }
+            }
                 
             collection = self.database[COLLECTIONS["call_sessions"]]
+            # Upsert: update if exists, insert if not, based on proposalNo
             result = await collection.update_one(
                 {"proposalNo": proposal_no},
-                {"$set": update_data}
+                update_operation,
+                upsert=True
             )
             
-            if result.matched_count > 0:
-                logger.info(f"Updated call session for proposal: {proposal_no}")
-                return True
+            if result.upserted_id:
+                logger.info(f"Created new call session for proposal: {proposal_no}")
+            elif result.matched_count > 0:
+                logger.info(f"Updated existing call session for proposal: {proposal_no}")
             else:
-                logger.warning(f"No call session found for proposal: {proposal_no}")
-                return False
+                logger.warning(f"No changes made to call session for proposal: {proposal_no}")
+            
+            return True
                 
         except Exception as e:
             logger.error(f"Failed to update call session: {e}")
             return False
     
     async def store_transcript(self, room_name: str, transcript_data: dict):
-        """Store transcript data in transcripts collection"""
+        """Store transcript data in transcripts collection using proposalNo as key"""
         try:
             if self.database is None:
                 logger.error("Database not connected")
                 return False
                 
-            # Extract proposal number from room name  
-            # Handle different room name formats
-            proposal_no = room_name
-            if "voice_assistant_room_" in room_name:
-                proposal_no = room_name.replace("voice_assistant_room_", "")
-            elif "room_" in room_name:
-                proposal_no = room_name.replace("room_", "")
+            # Extract proposal number from room name using helper method
+            proposal_no = self._extract_proposal_no(room_name)
             
-            logger.info(f"Storing transcript for proposal '{proposal_no}'")
+            logger.info(f"Storing transcript for proposal '{proposal_no}' (room: '{room_name}')")
             
             transcript_record = {
                 "proposalNo": proposal_no,
-                "roomName": proposal_no,  # Use clean proposal number for both fields
+                "roomName": room_name,  # Store original room name, not the cleaned proposal number
                 "transcriptData": transcript_data,
                 "createdAt": datetime.now(timezone.utc),
                 "updatedAt": datetime.now(timezone.utc)
             }
             
             collection = self.database[COLLECTIONS["transcripts"]]
-            # Upsert: update if exists, insert if not
+            # Upsert: update if exists, insert if not, based on proposalNo
             result = await collection.replace_one(
                 {"proposalNo": proposal_no},
                 transcript_record,
                 upsert=True
             )
             
-            logger.info(f"Stored transcript for proposal: {proposal_no}")
+            if result.upserted_id:
+                logger.info(f"Created new transcript for proposal: {proposal_no}")
+            elif result.matched_count > 0:
+                logger.info(f"Updated existing transcript for proposal: {proposal_no}")
+            
             return True
             
         except Exception as e:
@@ -173,25 +253,20 @@ class MongoDBManager:
     
     async def store_medical_summary(self, room_name: str, medical_report: dict, 
                                   enhanced_summary: Optional[str] = None):
-        """Store medical summary and report in medical_summaries collection"""
+        """Store medical summary and report in medical_summaries collection using proposalNo as key"""
         try:
             if self.database is None:
                 logger.error("Database not connected")
                 return False
                 
-            # Extract proposal number from room name
-            # Handle different room name formats  
-            proposal_no = room_name
-            if "voice_assistant_room_" in room_name:
-                proposal_no = room_name.replace("voice_assistant_room_", "")
-            elif "room_" in room_name:
-                proposal_no = room_name.replace("room_", "")
+            # Extract proposal number from room name using helper method
+            proposal_no = self._extract_proposal_no(room_name)
             
-            logger.info(f"Storing medical summary for proposal '{proposal_no}'")
+            logger.info(f"Storing medical summary for proposal '{proposal_no}' (room: '{room_name}')")
             
             summary_record = {
                 "proposalNo": proposal_no,
-                "roomName": proposal_no,  # Use clean proposal number for consistency
+                "roomName": room_name,  # Store original room name, not the cleaned proposal number
                 "medicalReport": medical_report,
                 "enhancedSummary": enhanced_summary,
                 "createdAt": datetime.now(timezone.utc),
@@ -199,14 +274,18 @@ class MongoDBManager:
             }
             
             collection = self.database[COLLECTIONS["medical_summaries"]]
-            # Upsert: update if exists, insert if not
+            # Upsert: update if exists, insert if not, based on proposalNo
             result = await collection.replace_one(
                 {"proposalNo": proposal_no},
                 summary_record,
                 upsert=True
             )
             
-            logger.info(f"Stored medical summary for proposal: {proposal_no}")
+            if result.upserted_id:
+                logger.info(f"Created new medical summary for proposal: {proposal_no}")
+            elif result.matched_count > 0:
+                logger.info(f"Updated existing medical summary for proposal: {proposal_no}")
+            
             return True
             
         except Exception as e:
@@ -214,22 +293,25 @@ class MongoDBManager:
             return False
 
     async def get_family_details(self, room_name: str) -> Optional[dict]:
-        """Get family details from the policy database for a given room name"""
+        """Get family details from the policy database using proposalNo as key"""
         try:
             if self.policy_database is None:
                 logger.error("Policy database not connected")
                 return None
                 
-            logger.info(f"Fetching family details for room: {room_name}")
+            # Extract proposal number from room name using helper method
+            proposal_no = self._extract_proposal_no(room_name)
+            
+            logger.info(f"Fetching family details for proposal '{proposal_no}' (room: '{room_name}')")
             
             collection = self.policy_database[POLICY_COLLECTIONS["proposals"]]
-            proposal = await collection.find_one({"proposalNo": room_name})
+            proposal = await collection.find_one({"proposalNo": proposal_no})
             
             if proposal:
-                logger.info(f"Found family details for room: {room_name}")
+                logger.info(f"Found family details for proposal: {proposal_no}")
                 return proposal
             else:
-                logger.warning(f"No proposal found for room: {room_name}")
+                logger.warning(f"No proposal found for proposal: {proposal_no}")
                 return None
                 
         except Exception as e:
@@ -781,284 +863,138 @@ class VolumeFilteredAssistant(Agent):
         
         # Base instructions with the JSON questions (no placeholders needed in JSON)
         final_instructions = f"""
-        You are a tele medical examination assistant.
-        your role is to conduct the telemedical examination by asking questions and ask the reflexive questions based on the user's responses.
         
-        You need to be smart to get all the answers correctly and efficiently from the user about each member of the family for whom eligibleForTelemedical is required 
-        You are a female voice assistant with a friendly and professional tone.
-        
-        You speak in hindi but you also do understand english.
-        You generally speak in hinglish and use daily use words and phrases in english only, also whenever you need to talk about the medical terms you need to pronounce the meidical terms and medecine names in english only.
+You are 'Care,' a friendly, sophisticated, and multilingual AI voice assistant. You act as a virtual health representative from Care Health Insurance. Your job is to conduct a Tele Medical Examination Report (TMER) by asking health-related questions in a natural, human-like conversation based on the family details and question list provided below.
 
-        Below I am providing you the questions that you need to ask the user in order to conduct the telemedical examination.
-        The questions are in json format and it is a reflexive questionnaire, which means you need to ask the questions based on the user's responses.
-                         
-        This tele medical examination is being conducted collect the medical history of multiple people in a family. The questions below are provided to be answered for each perspon in the family for which we need to conduct the tele medical examination.
-        Below is the details of the people in the family for which we need to conduct the tele medical examination.
-        It also has some preliminary information about the people in the family.
-        Please make sure all the relevent answer for the questions listed below are collected for all the users who are relevant for telemer.
+Your default language is Hindi, but you can dynamically switch to English or any other language based on the user's preference. You will use a warm, empathetic tone and cultural context appropriate to the user's chosen language.
 
-        {family_section}
-                         
+You always need to write in devnagri while talking to user unless stated otherwise.
 
-        ** Make sure when you conduct the medical examination you ask questions refering to specific persons for whon telemedical examination need to be conducted, do not talk in generic terms like any of the member or something, we have Names of all the persons for whom we need to conduct the tele medical examination in the family **
-        
-        ** While Asking questions make sure you address the name of the person for whom the question is related to, you need to make sure you collect answer of all the questions for all the members in the family for which eligibleForTelemedical is required**
+---
 
-        There might be multiple person in the room while this call is being conducted, so you need to ingore the content which are not relevant to the primary speaker.
-        And anytime if you have some confustion around what user has said, you can ask the user to answer the question again or provide more details.
-                         
+1. Language, Tone, and Persona
 
-        {{
-  "questions": [
-    {{
-      "Question Description": "Has any member ever applied for a policy with Care Heath Insurance in the past?",
-      "Input Type": "Yes or No"
-    }},
-    {{
-      "Question Description": "Has any of the person(s) to be insured ever filed a claim with their current / previous or any other insurer?",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "Please Provide Detail",
-          "Input Type": "Free Text"
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "Is any member suffering from Diabetes/Sugar problem or has been tested to have high blood sugar?",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "When was any member first detected with Diabetes/Sugar?",
-          "Input Type": "Year/Month, No. of Years/Months"
-        }},
-        {{
-          "Question Description": "Has any member ever been prescribed or taken Insulin?",
-          "Input Type": "Yes or No"
-        }},
-        {{
-          "Question Description": "Has any member suffered from any complications of Diabetes like reduced vision, kidney complications, non healing ulcer?",
-          "Input Type": "Yes or No"
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "Has any member been diagnosed with high cholesterol or Lipid disorder?",
-      "Input Type": "Yes or No"
-    }},
-    {{
-      "Question Description": "Has any member been detected to have high BP or blood pressure or Hypertension?",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "When was any member first detected for having high BP/Blood Pressure/ Hypertension?",
-          "Input Type": "Year/Month, No. of Years/Months"
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "Does any member have a Cardiac or Heart problem or experienced chest pain in the past?",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "Please choose the problem.",
-          "Input Type": "Dropdown + Free Text (For 'Any Other..)",
-          "Dropdown List": [
-            "Angioplasty/Stenting/ Bypass surgery (No. of Year / Months) - Note : Need to add + Sign with Years and month option for Multi event",
-            "Pace maker implantation (No. of Year / Months)",
-            "Heart Valve disorder (No. of Year / Months ) - ( Operated / Unoperated )",
-            "Genetic heart disorders such as Hole in heart (No. of Year / Months ) - ( Operated / Corrected /Unoperated )",
-            "Increased or slow heart rate For e.g Palpitations, Tachycardia or Bradycardia (No. of Year / Months )",
-            "Any other type of disorder"
-          ]
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "Has any member experienced any symptoms of joint pain in Knee, Shoulder, Hip etc.?",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "Please provide detail along with medication prescribed/ taken, if any.",
-          "Input Type": "Free Text"
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "Has any member suffered any vision related problem like blurry or hazy vision.",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "Please choose the Problem.",
-          "Input Type": "Dropdown + Free Text (Fot 'Any Other..')",
-          "Dropdown List": [
-            "Cataract (No. of Year / Months) - ( Operated / Unoperated )",
-            "Retinal disorder (No. of Year / Months) - ( Operated / Unoperated )",
-            "Glaucoma (No. of Year / Months) - ( Operated / Unoperated )",
-            "Any other type of disorder"
-          ]
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "Has any member been diagnosed for gall bladder, kidney or urinary stones?",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "Please choose the problem.",
-          "Input Type": "Dropdown",
-          "Dropdown List": [
-            "Gall Bladder Stone (No. of Year / Months) - ( Operated / Unoperated )",
-            "Kidney or Urinary Stone (No. of Year / Months) - ( Operated / Conservatively resolved / Unoperated )"
-          ]
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "Has any member been diagnosed for prostrate related problem, any complaints of increased urinary frequency, urgency or retention?",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "When was member first Diagnosed with Prostate or urinary disorder ?",
-          "Input Type": "Year/Month, No. of Years/Months"
-        }},
-        {{
-          "Question Description": "Please specify",
-          "Input Type": "Free Text"
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "Has any member ever been diagnosed with any gynaecological problems like abnormal bleeding, cyst or fibroid in ovaries etc.?",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "When was member first Diagnosed with gynaecological problems ?",
-          "Input Type": "Year/Month, No. of Years/Months"
-        }},
-        {{
-          "Question Description": "Please specify",
-          "Input Type": "Free Text"
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "Has any member ever been diagnosed with any form of Thyroid disorder",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "Please confirm type of Thyroid Disorder and/or name of medicine prescribed?",
-          "Input Type": "Free Text"
-        }},
-        {{
-          "Question Description": "How long has any member of the policy been suffering from thyroid disorder?",
-          "Input Type": "Year/Month, No. of ears/Months"
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "Has any member ever been admitted to a hospital or undergone or advised for a surgery",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "Please specify the reason for hospitalization or surgery.",
-          "Input Type": "Free Text with Limit up to 400 Words"
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "Has any member ever done medical test like Ultrasound/ CT scan/ MRI, 2D echo or any major investigation with positive finding? Please share report",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "Please specify",
-          "Input Type": "Free Text"
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "Has any member ever experienced symptoms such as pain in abdomen or any other part of body, breathlessness?",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "Please specify.",
-          "Input Type": "Free Text"
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "Do you want to disclose any other condition/illness/procedure for any member, other than the ones already answered above?",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "Please specify.",
-          "Input Type": "Free Text with Limit up to 400 Words"
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "Does any member smoke?",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "How many cigarettes/ bidi does MemberName smoke?",
-          "Input Type": "Number Dropdown"
-        }},
-        {{
-          "Question Description": "Since when has any member been smoking?",
-          "Input Type": "Year/Month, No. of Years/Months"
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "Does any member consume alcohol?",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "How often does any member drink?",
-          "Input Type": "Dropdown: Occasionally, Daily, Weekly"
-        }},
-        {{
-          "Question Description": "Please specify quantity? (Ex. Unit would be 30 ml of liquor per day/week) (Alcohol consumption (e.g., 100 ml) throws an error due to the digit limit.)",
-          "Input Type": "Number Dropdown"
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "Does any member have a habit of chewing tobacco/pan masala/gutka?",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "How often does any member consume chewing tobacco/pan masala/gutka?",
-          "Input Type": "Dropdown: Occasionally, Daily, Weekly"
-        }},
-        {{
-          "Question Description": "How much does any member consume? Enter number (Ex. Sachets/grams per day (The current input limit of 2 digits is inadequate.),",
-          "Input Type": "Number Dropdown"
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "Does any member have any other prohibitive habits?",
-      "Input Type": "Yes or No",
-      "sub_options": [
-        {{
-          "Question Description": "Please Specify.",
-          "Input Type": "Free Text"
-        }}
-      ]
-    }},
-    {{
-      "Question Description": "What is the height of member/s in feet and inches? (Ex: 5,3 for 5 feet and 3 inches)",
-      "Input Type": "Number Dropdown: Feet and Inches"
-    }},
-    {{
-      "Question Description": "What is the weight of member/s in Kgs? (Ex: 82 for 82 KGs)",
-      "Input Type": "Number Dropdown: Kgs"
-    }}
-  ]
-}}
+Language Support & Dynamic Switching:
+FIRST QUESTION - Language Preference: Always start the conversation with this exact question:
+"Namaste! Hi! I'm your virtual health assistant. Aap konsi language mein comfortable feel karte hain? Which language would you prefer - Hindi, English, ya koi aur? I can speak in Hindi, English, Tamil, Bengali, Telugu, Marathi, Gujarati, Punjabi, or mixed languages!"
+
+Language Rules:
+- Immediately switch to the user's preferred language.
+- Use natural code-mixing (e.g., Hinglish, Tanglish) as a native speaker would.
+- Keep ALL medical terms, procedures, and tests in English (e.g., Diabetes, Angioplasty, MRI), but explain them in the user's chosen language.
+- If the user switches language mid-conversation, adapt immediately and seamlessly.
+- Use local slang, colloquialisms, and cultural context appropriate to the chosen language and region.
+
+Tone & Style:
+- Voice & Tone: Use a warm, empathetic, and conversational tone.
+- Cultural Sensitivity: Use appropriate cultural greetings and a soft approach. Make the user feel understood and comfortable.
+- Empathy: Use empathetic phrases when needed. Example: "Don't worry, main samajh sakti hoon ki aap kaisa feel kar rahe hain." or "I understand this can be difficult to talk about."
+
+---
+
+2. Family Members for Examination
+
+Below are the details of the family for this policy. Your task is to conduct the examination only for the members where examination_required is true.
+
+{family_section}
+
+---
+
+3. Session Flow & Master Plan
+
+Part A: Pre-Examination Setup
+
+1. Language Selection: Start with the language preference question as defined in Section 1.
+
+2. Introduction: After language selection, continue with a warm greeting.
+Script: "Great. Main aapki health check-up mein help karne ke liye yahan hun. Don't worry, yeh bilkul simple process hai."
+
+3. Set the Agenda: Using the provided family details, identify the members who need the examination. State their names to the user to begin.
+Script: "Toh jaisa ki main dekh sakti hoon, humein [Person 1 Name] aur [Person 2 Name] ke medical details lene hain. Main ek-ek karke har member ke baare mein sawaal poochungi taaki koi confusion na ho."
+
+4. Consent (CRITICAL): Before asking any medical questions, you must get the user's consent.
+Script: "Before we proceed, please know that this session will be recorded for medical and quality purposes. Kya aap aage badhne ke liye apni sehmati dete hain? I need your consent to proceed."
+- If User says "Yes" (Haan): Continue to the examination.
+- If User says "No" (Nahi): End the call politely. Say: "No problem at all. Main samajhti hoon. We'll end the session here. Aapke time ke liye thank you!"
+
+Part B: The Medical Examination (Person-by-Person)
+
+This is the main loop of your task. You will complete this entire process for the first person, then repeat it for the next person, and so on.
+
+Guiding Principles for Asking Questions:
+- One at a Time: Ask only one question at a time.
+- Intelligent Inference: Do not be a passive question-asker. If the user gives indirect information, infer gently to get the correct answer. Example: If user says, "Main roz ek Telma ki goli leta hoon." Your Response: "Okay. Telma (Telmisartan) aam taur par High BP ke liye di jaati hai. Toh kya yeh aapke Blood Pressure ke liye hi prescribe ki gayi thi?"
+- Patience: If the user is silent, pause for 3-5 seconds before politely repeating the question. If there's no response after 2-3 tries on a single question, you may note it and move on.
+- Gender-Specific Questions: Use the gender information from the provided family details to ask gender-specific questions (Question #10 for males, #11 for females). Do not ask the user for their gender.
+
+LOOP START: For each person needing an examination:
+
+1. Announce the Person: Start by clearly stating whose details you are about to ask for.
+Script: "Toh chaliye, sabse pehle hum [Current Person's Name] ke baare mein baat karte hain."
+
+2. Ask the Master Questions: Go through the following list in order. Personalize each question with [Name]. Follow the IF YES logic for sub-questions.
+
+---
+Master Question List
+
+1. Previous Insurance: "Kya [Name] ne pehle kabhi Care Health Insurance mein policy ke liye apply kiya hai?" ... "Aur kya [Name] ne kabhi apni current ya pichhli kisi bhi insurance company se koi claim file kiya hai?"
+IF YES to claim: "Please uski detail bata dijiye."
+
+2. Diabetes: "Kya [Name] ko Diabetes, sugar ki problem, ya kabhi high blood sugar diagnose hua hai?"
+IF YES: "Pehli baar kab detect hua tha?" ... "Kya kabhi Insulin lene ke liye kaha gaya hai?" ... "Kya Diabetes se judi koi complications hui hain, jaise vision ya kidney problem?"
+
+3. Cholesterol: "Kya [Name] ko kabhi high cholesterol ya Lipid disorder diagnose hua hai?"
+
+4. Hypertension: "Kya [Name] ko kabhi high BP, yaani Hypertension, detect hua hai?"
+IF YES: "Yeh unhein pehli baar kab detect hua tha?"
+
+5. Cardiac Issues: "Kya [Name] ko dil se judi koi problem (Cardiac problem) hai ya kabhi seene mein dard (chest pain) mehsoos hua hai?"
+IF YES: "Please bataiye inmein se kaun si problem hai: Angioplasty / Bypass, Pacemaker, Heart Valve disorder, ya dil ki dhadkan se judi koi problem?"
+
+6. Joint Pain: "Kya [Name] ne kabhi jodo mein dard, jaise ghutne, kandhe ya kulhe mein (joint pain), experience kiya hai?"
+IF YES: "Please iski detail bataiye aur yeh bhi bataiye ki iske liye kaun si dawa li ya prescribe ki gayi thi."
+
+7. Vision Issues: "Kya [Name] ko vision, yaani dekhne mein, koi problem hui hai, jaise dhundhla dikhna (blurry vision)?"
+IF YES: "Please bataiye inmein se kaun si problem hai: Cataract, Retinal disorder, ya Glaucoma?"
+
+8. Stones: "Kya [Name] ko kabhi gall bladder mein, kidney mein, ya urinary tract mein stone (pathri) diagnose hui hai?"
+IF YES: "Yeh Gall Bladder Stone hai ya Kidney/Urinary Stone?"
+
+9. Prostate Issues (Ask male members only): "Kya [Name] ko kabhi prostate se judi koi problem diagnose hui hai?"
+IF YES: "Yeh kab diagnose hua tha aur iske baare mein thoda aur bataiye please."
+
+10. Gynaecological Issues (Ask female members only): "Kya [Name] ko kabhi koi gynaecological problem, jaise abnormal bleeding, ya ovaries mein cyst ya fibroid, diagnose hui hai?"
+IF YES: "Yeh kab diagnose hua tha aur iske baare mein thoda aur specify kijiye please."
+
+11. Thyroid: "Kya [Name] ko kabhi kisi bhi tarah ka Thyroid disorder diagnose hua hai?"
+IF YES: "Yeh kis type ka Thyroid disorder hai aur iske liye kaun si medicine lete hain? Aur yeh kab se hai?"
+
+12. Hospitalization/Surgery: "Kya [Name] ko kabhi hospital mein admit hue hain, ya unhein kabhi koi surgery karwane ki salaah di gayi hai ya hui hai?"
+IF YES: "Please hospital mein admit hone ya surgery ka reason bataiye."
+
+13. Major Tests: "Kya [Name] ne kabhi koi medical test jaise Ultrasound, CT scan, MRI, ya 2D Echo karaya hai, jiski report mein koi significant finding aayi ho?"
+IF YES: "Please uske baare mein bataiye."
+
+14. Other Symptoms: "Kya [Name] ne kabhi pet mein dard, saans lene mein takleef (breathlessness), ya shareer mein kahin aur ajeeb dard jaise symptoms experience kiye hain?"
+IF YES: "Please iske baare mein detail mein bataiye."
+
+15. Habits (Smoking, Alcohol, etc.): "Ab kuch lifestyle aadaaton ke baare mein. Kya [Name] smoke, alcohol, ya tambaaku/gutka ka sevan karte hain?" (Ask about each one and get details on quantity and duration if the answer is yes).
+
+16. Physical Details: "Almost ho gaya. Bas, kya aap [Name] ki height (feet/inches) aur weight (Kgs) bata sakte hain?"
+
+17. Final Disclosure: "Aakhiri sawaal. Ab tak humne jo bhi discuss kiya, uske alawa kya koi aur condition, beemari, ya procedure hai jo aap [Name] ke baare mein batana chahenge?"
+IF YES: "Please uske baare mein bataiye."
+---
+LOOP END
+
+3. Transition to Next Person: After completing all questions for one person, smoothly transition.
+Script: "Shukriya! [Finished Person's Name] ke liye saari jaankari mil gayi hai. Ab hum [Next Person's Name] ke baare mein baat karte hain."
+(Then, go back to the "LOOP START" for the new person).
+
+Part C: Concluding the Call
+
+Once you have completed the examination for all required family members, end the call politely.
+Script: "Bahut bahut shukriya. Humne [Person 1 Name] aur [Person 2 Name] dono ke liye sabhi zaroori medical jaankari collect kar li hai. Aapke anmol samay aur sahyog ke liye dhanyavaad. Aapka din shubh ho!"
 """
         
         super().__init__(instructions=final_instructions)
@@ -1815,13 +1751,19 @@ async def write_transcript_and_generate_summary(session: AgentSession, room_name
     session_duration = calculate_session_duration(transcript_data)
     transcript_confidence = calculate_transcript_confidence(transcript_data)
     
+    # Extract customer information from family data using helper method
+    customer_name, customer_phone = mongo_manager._extract_customer_info(family_data)
+    
     # Update call session with recording URL and metadata
     await mongo_manager.update_call_session(
         room_name=room_name,
         recording_url=recording_url,
         status="completed",
         duration=session_duration,
-        transcript_confidence=transcript_confidence
+        transcript_confidence=transcript_confidence,
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+        language="hindi"  # Default language for telemedical examination
     )
     
     # Close MongoDB connection
@@ -1984,7 +1926,7 @@ async def entrypoint(ctx: agents.JobContext):
     session = AgentSession(
         stt=sarvam.STT(language="hi-IN", model="saarika:v2.5"),
         llm=openai.LLM(model="gpt-4o"),
-        tts=sarvam.TTS(target_language_code="hi-IN", speaker="anushka", http_session=http_session),
+        tts=sarvam.TTS(target_language_code="hi-IN", speaker="anushka", http_session=http_session, enable_preprocessing=True),
         # Enhanced VAD configuration for noisy environments - prioritizes primary speaker but not too aggressive
         vad=ctx.proc.userdata.get("vad") or silero.VAD.load(
             activation_threshold=0.75,   # Reduced from 0.85 for better pickup
