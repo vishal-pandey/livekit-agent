@@ -693,8 +693,8 @@ class VolumeFilteredAssistant(Agent):
         
         # Initialize silence detector
         self.silence_detector = SilenceDetector(
-            silence_timeout=30.0,  # 30 seconds of silence before first prompt
-            prompt_interval=30.0   # 30 seconds between subsequent prompts
+            silence_timeout=10.0,  # 10 seconds of silence before first prompt
+            prompt_interval=10.0   # 10 seconds between subsequent prompts
         )
         
         # Session reference to send prompts
