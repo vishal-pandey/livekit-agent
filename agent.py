@@ -867,7 +867,7 @@ class VolumeFilteredAssistant(Agent):
 
 System Prompt:
 
-You are 'Eric Tele MER Agent,' a friendly, sophisticated, and multilingual AI voice assistant. You act as a virtual Medical examination Tellercaller representative from Care Health Insurance. Your job is to conduct a Tele Medical Examination Report (TMER) by asking health-related questions in a natural, human-like conversation based on the family details and question list provided below.
+You are 'Eric Tele MER Agent,' a friendly, sophisticated, and multilingual AI voice assistant. You are female in gender. You act as a virtual Medical examination Tellercaller representative from Care Health Insurance. Your job is to conduct a Tele Medical Examination Report (TMER) by asking health-related questions in a natural, human-like conversation based on the family details and question list provided below.
 
 Your default language is Hindi. You always need to write in the language in which communication is happening.
 
@@ -1029,11 +1029,11 @@ Script: "बहुत बहुत शुक्रिया। हमने [Per
         # Initialize local audio recorder as fallback
         self.local_recorder = LocalAudioRecorder(room_name)
         
-        # Initialize silence detector
-        self.silence_detector = SilenceDetector(
-            base_silence_timeout=20.0,  # Base timeout for silence detection
-            prompt_interval=20.0   # Time between subsequent prompts
-        )
+        # Initialize silence detector - DISABLED
+        # self.silence_detector = SilenceDetector(
+        #     base_silence_timeout=20.0,  # Base timeout for silence detection
+        #     prompt_interval=20.0   # Time between subsequent prompts
+        # )
         
         # Session reference to send prompts
         self._session: Optional[AgentSession] = None
@@ -1066,8 +1066,8 @@ Script: "बहुत बहुत शुक्रिया। हमने [Per
         
         if should_process:
             self.processed_frames += 1
-            # Reset silence detector when user speaks (using universal activity reset)
-            self.silence_detector.reset_activity_for_any_message()
+            # Reset silence detector when user speaks (using universal activity reset) - DISABLED
+            # self.silence_detector.reset_activity_for_any_message()
         else:
             self.ignored_frames += 1
         
@@ -1075,11 +1075,11 @@ Script: "बहुत बहुत शुक्रिया। हमने [Per
         if (self.processed_frames + self.ignored_frames) % 200 == 0:
             total = self.processed_frames + self.ignored_frames
             filtering_summary = self.enhanced_noise_filter.get_filtering_summary()
-            timeout_stats = self.get_silence_timeout_stats()
+            # timeout_stats = self.get_silence_timeout_stats()  # DISABLED
             logger.info(f"Enhanced Audio Filtering Stats - Processed: {self.processed_frames}/{total} ({self.processed_frames/total*100:.1f}%), "
                        f"Primary Speaker Established: {filtering_summary['primary_speaker_established']}, "
-                       f"Background Noise Level: {filtering_summary['background_noise_level']:.4f}, "
-                       f"Silence Timeout: {timeout_stats['current_silence_timeout']:.1f}s/{timeout_stats['base_timeout']:.1f}s")
+                       f"Background Noise Level: {filtering_summary['background_noise_level']:.4f}")
+                       # f"Silence Timeout: {timeout_stats['current_silence_timeout']:.1f}s/{timeout_stats['base_timeout']:.1f}s")  # DISABLED
         
         return should_process
     
@@ -1088,14 +1088,14 @@ Script: "बहुत बहुत शुक्रिया। हमने [Per
         self._session = session
         
     def start_silence_monitoring(self):
-        """Start monitoring for user silence"""
-        self.silence_detector.start_monitoring()
-        logger.info("Started silence monitoring")
+        """Start monitoring for user silence - DISABLED"""
+        # self.silence_detector.start_monitoring()
+        logger.info("Silence monitoring is disabled")
         
     def stop_silence_monitoring(self):
-        """Stop monitoring for user silence"""
-        self.silence_detector.stop_monitoring()
-        logger.info("Stopped silence monitoring")
+        """Stop monitoring for user silence - DISABLED"""
+        # self.silence_detector.stop_monitoring()
+        logger.info("Silence monitoring is disabled")
     
     def reset_noise_filter(self):
         """Reset the enhanced noise filter for a new session"""
@@ -1124,53 +1124,25 @@ Script: "बहुत बहुत शुक्रिया। हमने [Per
         return {**basic_stats, **enhanced_stats}
         
     def get_silence_timeout_stats(self) -> dict:
-        """Get silence timeout statistics for monitoring"""
-        basic_stats = {
-            'current_silence_timeout': self.silence_detector.current_silence_timeout,
-            'base_timeout': self.silence_detector.base_silence_timeout,
-            'is_monitoring': self.silence_detector.is_monitoring,
-            'prompt_count': self.silence_detector.prompt_count
+        """Get silence timeout statistics for monitoring - DISABLED"""
+        # Return empty stats since silence detection is disabled
+        return {
+            'current_silence_timeout': 0,
+            'base_timeout': 0,
+            'is_monitoring': False,
+            'prompt_count': 0,
+            'disabled': True
         }
-        timeout_stats = self.silence_detector.get_timeout_stats()
-        return {**basic_stats, **timeout_stats}
         
     def set_dynamic_silence_timeout_for_message(self, message: str):
-        """Set dynamic silence timeout based on a message that the agent is about to send"""
-        dynamic_timeout = self.silence_detector.calculate_dynamic_timeout_from_message(message)
-        self.silence_detector.set_dynamic_timeout(dynamic_timeout)
-        logger.debug(f"🤖 Pre-set dynamic timeout {dynamic_timeout:.1f}s for outgoing message")
+        """Set dynamic silence timeout based on a message that the agent is about to send - DISABLED"""
+        # dynamic_timeout = self.silence_detector.calculate_dynamic_timeout_from_message(message)
+        # self.silence_detector.set_dynamic_timeout(dynamic_timeout)
+        logger.debug(f"🤖 Silence detection disabled - ignoring timeout setting for message")
         
     async def check_and_handle_silence(self) -> bool:
-        """Check for silence and send prompt if needed. Returns True if session should end."""
-        if self.silence_detector.should_prompt_user():
-            prompt_message = self.silence_detector.get_prompt_message()
-            
-            if self._session:
-                # Set dynamic timeout for the prompt message before sending
-                self.set_dynamic_silence_timeout_for_message(prompt_message)
-                
-                logger.info(f"Sending silence prompt (count: {self.silence_detector.prompt_count + 1}, "
-                           f"timeout: {self.silence_detector.current_silence_timeout:.1f}s): {prompt_message}")
-                await self._session.say(prompt_message)
-                # Reset activity timer since agent just spoke
-                self.silence_detector.reset_activity_for_any_message()
-                logger.debug("🤖 Silence prompt sent - reset activity timer")
-                
-            self.silence_detector.mark_prompt_sent()
-            
-            # Check if we should end the session after too many prompts
-            if self.silence_detector.should_end_session():
-                logger.warning("Maximum silence prompts reached, ending session")
-                if self._session:
-                    final_message = "मुझे लगता है आप वहाँ नहीं हैं। मैं यह सेशन समाप्त कर रही हूँ। धन्यवाद!"
-                    # Set dynamic timeout for final message
-                    self.set_dynamic_silence_timeout_for_message(final_message)
-                    await self._session.say(final_message)
-                    # Reset activity timer for the final message too
-                    self.silence_detector.reset_activity_for_any_message()
-                    logger.debug("🤖 Final message sent - reset activity timer")
-                return True
-                
+        """Check for silence and send prompt if needed. Returns True if session should end. - DISABLED"""
+        # Silence detection is disabled, always return False (don't end session)
         return False
 
 
@@ -1946,11 +1918,11 @@ async def entrypoint(ctx: agents.JobContext):
         stt=sarvam.STT(language="hi-IN", model="saarika:v2.5"),
         llm=openai.LLM(model="gpt-4o"),
         tts=sarvam.TTS(target_language_code="hi-IN", speaker="anushka", http_session=http_session, enable_preprocessing=True),
-        # Enhanced VAD configuration for noisy environments - prioritizes primary speaker but not too aggressive
+        # Optimized VAD configuration for faster response times while maintaining noise filtering
         vad=ctx.proc.userdata.get("vad") or silero.VAD.load(
-            activation_threshold=0.75,   # Reduced from 0.85 for better pickup
-            min_silence_duration=0.8,   # Reduced from 1.0 for more responsiveness
-            min_speech_duration=0.2,    # Reduced from 0.3 for faster activation
+            activation_threshold=0.75,   # Balanced threshold for good pickup without false triggers
+            min_silence_duration=0.4,   # Reduced from 0.8 for much faster response (agent responds 400ms after user stops)
+            min_speech_duration=0.15,   # Reduced from 0.2 for even faster activation
         ),
         turn_detection=MultilingualModel(),
     )
@@ -1970,76 +1942,9 @@ async def entrypoint(ctx: agents.JobContext):
     silence_monitoring_task = None
 
     async def silence_monitor():
-        """Background task to monitor for silence and send prompts"""
-        while True:
-            try:
-                should_end = await agent.check_and_handle_silence()
-                if should_end:
-                    logger.info("Session ended due to prolonged silence")
-                    # End the session gracefully by breaking the loop
-                    # The cleanup will be handled by the session end callback
-                    break
-                    
-                # Check for both user and agent messages in session history to reset activity timer
-                if hasattr(session, 'history') and session.history:
-                    history_dict = session.history.to_dict()
-                    all_items = history_dict.get('items', [])
-                    
-                    # Filter user and agent messages (check for multiple possible agent role names)
-                    user_messages = [item for item in all_items if item.get('role') in ['user']]
-                    agent_messages = [item for item in all_items if item.get('role') in ['agent', 'assistant', 'system']]
-                    
-                    # Debug: Log all roles we see (only every 20 checks to avoid spam)
-                    if len(all_items) > 0 and (len(all_items) % 20 == 0):
-                        unique_roles = set(item.get('role', 'unknown') for item in all_items)
-                        logger.debug(f"Session history roles detected: {unique_roles}, Total items: {len(all_items)}")
-                    
-                    # Initialize counters if they don't exist
-                    if not hasattr(agent, '_last_user_message_count'):
-                        agent._last_user_message_count = 0
-                    if not hasattr(agent, '_last_agent_message_count'):
-                        agent._last_agent_message_count = 0
-                    
-                    # Check for new user messages
-                    current_user_message_count = len(user_messages)
-                    if current_user_message_count > agent._last_user_message_count:
-                        agent.silence_detector.reset_activity_for_any_message()
-                        logger.debug(f"✅ User message detected - reset silence timer (count: {current_user_message_count})")
-                        agent._last_user_message_count = current_user_message_count
-                    
-                    # Check for new agent messages (agent speaking = activity)
-                    current_agent_message_count = len(agent_messages)
-                    if current_agent_message_count > agent._last_agent_message_count:
-                        # Get the latest agent message for dynamic timeout calculation
-                        latest_agent_message = agent_messages[-1] if agent_messages else None
-                        agent_message_content = ""
-                        
-                        if latest_agent_message:
-                            content = latest_agent_message.get('content', [])
-                            if isinstance(content, list):
-                                agent_message_content = " ".join(str(item) for item in content)
-                            else:
-                                agent_message_content = str(content)
-                        
-                        # Calculate dynamic timeout based on agent message word count
-                        dynamic_timeout = agent.silence_detector.calculate_dynamic_timeout_from_message(agent_message_content)
-                        agent.silence_detector.set_dynamic_timeout(dynamic_timeout)
-                        
-                        # Reset activity timer
-                        agent.silence_detector.reset_activity_for_any_message()
-                        logger.debug(f"🤖 Agent message detected - reset silence timer with dynamic timeout "
-                                   f"{dynamic_timeout:.1f}s (count: {current_agent_message_count}, "
-                                   f"words: {len(agent_message_content.split()) if agent_message_content else 0})")
-                        agent._last_agent_message_count = current_agent_message_count
-                        
-                        # Add a small buffer to ensure agent is done speaking before resuming silence monitoring
-                        # The buffer time is now included in the dynamic timeout calculation
-                        await asyncio.sleep(2.0)  # Give agent extra time to finish speaking
-                
-                await asyncio.sleep(5)  # Check every 5 seconds
-            except Exception as e:
-                logger.error(f"Error in silence monitoring: {e}")
-                await asyncio.sleep(5)
+        """Background task to monitor for silence and send prompts - DISABLED"""
+        logger.info("Silence monitoring is disabled - background task will not run")
+        return  # Exit immediately since silence detection is disabled
 
     async def cleanup_and_record():
         nonlocal recording_egress_id, recording_s3_url, silence_monitoring_task
@@ -2055,11 +1960,11 @@ async def entrypoint(ctx: agents.JobContext):
         logger.info(f"  - Primary Speaker Established: {noise_stats['primary_speaker_established']}")
         logger.info(f"  - Final Background Noise Level: {noise_stats['background_noise_level']:.4f}")
         
-        # Stop silence monitoring
+        # Stop silence monitoring - DISABLED
         if silence_monitoring_task:
             silence_monitoring_task.cancel()
             
-        agent.stop_silence_monitoring()
+        # agent.stop_silence_monitoring()  # DISABLED
         
         if recording_egress_id:
             logger.info("Stopping LiveKit Egress room recording...")
@@ -2105,7 +2010,7 @@ async def entrypoint(ctx: agents.JobContext):
         wait_start = asyncio.get_event_loop().time()
         
         while not user_spoke and (asyncio.get_event_loop().time() - wait_start) < max_wait_time:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)  # Reduced from 0.5s for faster user detection
             # Check if we have any user messages in session history
             if hasattr(session, 'history') and session.history:
                 history_dict = session.history.to_dict()
@@ -2117,12 +2022,12 @@ async def entrypoint(ctx: agents.JobContext):
         
         if user_spoke and not recording_started:
             recording_started = True
-            # Additional delay to ensure audio is stable
-            await asyncio.sleep(1.0)
+            # Reduced delay to ensure audio is stable while maintaining responsiveness
+            await asyncio.sleep(0.3)  # Reduced from 1.0s for faster response
             
-            # Start silence monitoring once user has spoken
-            logger.info("Starting silence monitoring...")
-            agent.start_silence_monitoring()
+            # Start silence monitoring once user has spoken - DISABLED
+            logger.info("Silence monitoring disabled")
+            # agent.start_silence_monitoring()
             
             logger.info("Attempting to start LiveKit Egress room recording...")
             recording_result = await start_room_recording(ctx.room.name)
@@ -2143,11 +2048,12 @@ async def entrypoint(ctx: agents.JobContext):
     # Start the recording task in background
     recording_task = asyncio.create_task(start_recording_after_user_speech())
     
-    # Wait a bit for the initial setup
-    await asyncio.sleep(2.0)
+    # Wait a bit for the initial setup (reduced for faster startup)
+    await asyncio.sleep(1.0)  # Reduced from 2.0s for faster agent readiness
     
-    # Start the silence monitoring task after initial setup
-    silence_monitoring_task = asyncio.create_task(silence_monitor())
+    # Start the silence monitoring task after initial setup - DISABLED
+    # silence_monitoring_task = asyncio.create_task(silence_monitor())
+    logger.info("Silence monitoring task disabled")
     
     # Keep the agent alive until the session ends
     await asyncio.sleep(0.1)  # Small delay to ensure everything is set up
@@ -2156,16 +2062,16 @@ async def entrypoint(ctx: agents.JobContext):
 
 
 def prewarm(proc: agents.JobProcess):
-    """Prewarm VAD model to improve startup times with balanced noise filtering configuration"""
-    # Balanced VAD configuration for noisy environments
-    # Not too aggressive to ensure user voice pickup while still filtering background noise
+    """Prewarm VAD model to improve startup times with optimized response configuration"""
+    # Optimized VAD configuration for faster response times while maintaining noise filtering
+    # Prioritizes quick response over conservative noise filtering
     proc.userdata["vad"] = silero.VAD.load(
-        activation_threshold=0.7,    # Reduced from 0.8 for better user voice pickup
-        min_silence_duration=1.0,   # Reduced from 1.2 for better responsiveness
-        min_speech_duration=0.2,    # Reduced from 0.25 for faster activation
-        # These settings balance noise filtering with user voice pickup
+        activation_threshold=0.75,   # Balanced threshold for good pickup without false triggers
+        min_silence_duration=0.4,   # Reduced from 1.0 for much faster response (agent responds 400ms after user stops)
+        min_speech_duration=0.15,   # Reduced from 0.2 for even faster activation
+        # These settings prioritize fast response while maintaining reasonable noise filtering
     )
-    logger.info("VAD prewarmed with balanced noise filtering configuration for telemedical examination")
+    logger.info("VAD prewarmed with optimized fast-response configuration for telemedical examination")
 
 
 if __name__ == "__main__":
