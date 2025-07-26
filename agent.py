@@ -1039,6 +1039,11 @@ Script: "बहुत बहुत शुक्रिया। हमने [Per
         self._session: Optional[AgentSession] = None
         self._last_user_message_count = 0
         self._last_agent_message_count = 0  # Track agent messages as activity too
+        
+        # Speech state tracking to prevent interruptions
+        self._is_speaking = False
+        self._speech_start_time = 0.0
+        self._last_speech_text = ""
     
     def should_process_audio(self, audio_frame: rtc.AudioFrame) -> bool:
         """Filter audio based on enhanced noise filtering to focus on primary speaker"""
@@ -1139,6 +1144,138 @@ Script: "बहुत बहुत शुक्रिया। हमने [Per
         # dynamic_timeout = self.silence_detector.calculate_dynamic_timeout_from_message(message)
         # self.silence_detector.set_dynamic_timeout(dynamic_timeout)
         logger.debug(f"🤖 Silence detection disabled - ignoring timeout setting for message")
+        
+    async def reliable_say(self, message: str, wait_for_completion: bool = True) -> bool:
+        """
+        Reliably deliver speech with proper completion waiting and error handling.
+        Prevents speech interruption by tracking speech state.
+        
+        Args:
+            message: The text message to speak
+            wait_for_completion: Whether to wait for speech completion before returning
+            
+        Returns:
+            True if speech was delivered successfully, False otherwise
+        """
+        if not self._session or not message.strip():
+            logger.warning("Cannot speak: No session or empty message")
+            return False
+            
+        try:
+            # Mark that we're starting to speak
+            self._is_speaking = True
+            self._speech_start_time = time.time()
+            self._last_speech_text = message
+            
+            # Log the full message that should be spoken
+            logger.info(f"🎤 Speaking complete message: '{message}'")
+            
+            # Ensure message ends with proper punctuation for better TTS delivery
+            if not message.strip().endswith(('.', '!', '?', '।')):
+                message = message.strip() + '।'  # Add Hindi punctuation
+            
+            # Split very long messages into smaller chunks if needed (to prevent TTS timeouts)
+            max_chunk_length = 200  # characters
+            if len(message) > max_chunk_length:
+                logger.info(f"Message is long ({len(message)} chars), splitting into chunks")
+                sentences = message.split('।')
+                chunks = []
+                current_chunk = ""
+                
+                for sentence in sentences:
+                    if len(current_chunk + sentence + '।') <= max_chunk_length:
+                        current_chunk += sentence + '।'
+                    else:
+                        if current_chunk:
+                            chunks.append(current_chunk.strip())
+                        current_chunk = sentence + '।'
+                
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                
+                # Speak each chunk sequentially
+                for i, chunk in enumerate(chunks):
+                    logger.info(f"🎤 Speaking chunk {i+1}/{len(chunks)}: '{chunk}'")
+                    await self._session.say(chunk)
+                    
+                    # Add small delay between chunks to ensure proper delivery
+                    if i < len(chunks) - 1:  # Don't wait after the last chunk
+                        await asyncio.sleep(0.5)  # Increased delay for reliability
+                        
+            else:
+                # Speak the complete message at once
+                await self._session.say(message)
+            
+            # Wait for speech completion if requested
+            if wait_for_completion:
+                # Estimate speech duration and wait accordingly
+                word_count = len(message.split())
+                estimated_duration = (word_count / 2.0) + 1.5  # Conservative: 2 words/sec + 1.5s buffer
+                logger.debug(f"Waiting {estimated_duration:.1f}s for speech completion ({word_count} words)")
+                await asyncio.sleep(estimated_duration)
+            
+            # Mark that we've finished speaking
+            self._is_speaking = False
+            speech_duration = time.time() - self._speech_start_time
+            
+            logger.info(f"✅ Successfully delivered complete message (took {speech_duration:.1f}s)")
+            return True
+            
+        except Exception as e:
+            self._is_speaking = False  # Ensure we reset state even on error
+            logger.error(f"❌ Failed to deliver speech: {e}")
+            return False
+    
+    def should_interrupt_speech(self) -> bool:
+        """
+        Determine if agent speech should be interrupted.
+        This prevents premature interruption while allowing necessary stops.
+        """
+        if not self._is_speaking:
+            return True  # Not speaking, so can be interrupted
+            
+        # Don't interrupt if we just started speaking (give minimum time)
+        min_speech_time = 1.0  # seconds
+        speech_duration = time.time() - self._speech_start_time
+        
+        if speech_duration < min_speech_time:
+            logger.debug(f"Preventing early interruption (only {speech_duration:.1f}s of {min_speech_time}s min)")
+            return False
+            
+        return True  # Allow interruption after minimum speech time
+
+    async def safe_say(self, message: str) -> bool:
+        """
+        Safely say a message, checking for speech state to prevent interruptions.
+        This is the main method that should be used for all agent speech.
+        """
+        if self._is_speaking:
+            logger.warning(f"Already speaking, queuing message: '{message[:50]}...'")
+            # Wait for current speech to finish before starting new speech
+            max_wait = 10.0  # Maximum wait time in seconds
+            wait_start = time.time()
+            
+            while self._is_speaking and (time.time() - wait_start) < max_wait:
+                await asyncio.sleep(0.1)
+                
+            if self._is_speaking:
+                logger.error(f"Timeout waiting for speech completion, forcing new speech")
+                self._is_speaking = False
+        
+        return await self.reliable_say(message, wait_for_completion=True)
+    
+    def is_currently_speaking(self) -> bool:
+        """Check if the agent is currently speaking"""
+        return self._is_speaking
+        
+    def get_speech_state(self) -> dict:
+        """Get current speech state information"""
+        return {
+            'is_speaking': self._is_speaking,
+            'speech_start_time': self._speech_start_time,
+            'last_speech_text': self._last_speech_text,
+            'speech_duration': time.time() - self._speech_start_time if self._is_speaking else 0
+        }
         
     async def check_and_handle_silence(self) -> bool:
         """Check for silence and send prompt if needed. Returns True if session should end. - DISABLED"""
@@ -1917,13 +2054,20 @@ async def entrypoint(ctx: agents.JobContext):
     session = AgentSession(
         stt=sarvam.STT(language="hi-IN", model="saarika:v2.5"),
         llm=openai.LLM(model="gpt-4o"),
-        tts=sarvam.TTS(target_language_code="hi-IN", speaker="anushka", http_session=http_session, enable_preprocessing=True),
-        # Optimized VAD configuration for faster response times while maintaining noise filtering
-        vad=ctx.proc.userdata.get("vad") or silero.VAD.load(
-            activation_threshold=0.75,   # Balanced threshold for good pickup without false triggers
-            min_silence_duration=0.4,   # Reduced from 0.8 for much faster response (agent responds 400ms after user stops)
-            min_speech_duration=0.15,   # Reduced from 0.2 for even faster activation
+        tts=sarvam.TTS(
+            target_language_code="hi-IN", 
+            speaker="anushka", 
+            http_session=http_session, 
+            speech_sample_rate=16000,
+            enable_preprocessing=True  # Disabled to prevent speech interruptions and improve reliability
         ),
+        # Optimized VAD configuration for faster response times while preventing speech interruption
+        vad=ctx.proc.userdata.get("vad") or silero.VAD.load(
+            activation_threshold=0.8,    # Slightly higher to prevent false activation during agent speech
+            min_silence_duration=0.5,    # Increased slightly to ensure agent finishes speaking
+            min_speech_duration=0.2,     # Require more speech duration to avoid interrupting agent
+        ),
+        # Use more conservative turn detection to prevent speech interruption
         turn_detection=MultilingualModel(),
     )
 
@@ -1985,9 +2129,14 @@ async def entrypoint(ctx: agents.JobContext):
 
     initial_greeting = "नमस्ते! मैं आपका तेलीमेडिकल एग्जामिनेशन असिस्टेंट हूँ। मैं आपसे कुछ मेडिकल सवाल पूछूंगी। क्या आप तैयार हैं?"
     
-    # Set dynamic timeout for the initial greeting
+    # Set dynamic timeout for the initial greeting - DISABLED (but keep for compatibility)
     agent.set_dynamic_silence_timeout_for_message(initial_greeting)
-    await session.say(initial_greeting)
+    
+    # Use safe speech delivery to prevent interruptions and ensure complete message is spoken
+    success = await agent.safe_say(initial_greeting)
+    if not success:
+        logger.warning("Failed to deliver initial greeting with safe_say, falling back to standard method")
+        await session.say(initial_greeting)
 
     # Wait for participant and let the session run naturally
     logger.info("Agent is running and waiting for participants...")
@@ -2062,16 +2211,15 @@ async def entrypoint(ctx: agents.JobContext):
 
 
 def prewarm(proc: agents.JobProcess):
-    """Prewarm VAD model to improve startup times with optimized response configuration"""
-    # Optimized VAD configuration for faster response times while maintaining noise filtering
-    # Prioritizes quick response over conservative noise filtering
+    """Prewarm VAD model to improve startup times with speech-interruption-prevention configuration"""
+    # Optimized VAD configuration that prevents agent speech interruption while maintaining responsiveness
     proc.userdata["vad"] = silero.VAD.load(
-        activation_threshold=0.75,   # Balanced threshold for good pickup without false triggers
-        min_silence_duration=0.4,   # Reduced from 1.0 for much faster response (agent responds 400ms after user stops)
-        min_speech_duration=0.15,   # Reduced from 0.2 for even faster activation
-        # These settings prioritize fast response while maintaining reasonable noise filtering
+        activation_threshold=0.8,    # Slightly higher to prevent false activation during agent speech
+        min_silence_duration=0.5,    # Increased slightly to ensure agent finishes speaking
+        min_speech_duration=0.2,     # Require more speech duration to avoid interrupting agent
+        # These settings balance responsiveness with speech completion reliability
     )
-    logger.info("VAD prewarmed with optimized fast-response configuration for telemedical examination")
+    logger.info("VAD prewarmed with speech-interruption-prevention configuration for telemedical examination")
 
 
 if __name__ == "__main__":
